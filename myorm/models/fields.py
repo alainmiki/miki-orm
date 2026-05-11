@@ -8,7 +8,7 @@ Ref: https://docs.djangoproject.com/en/6.0/ref/models/fields/
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields as dc_fields
+from dataclasses import dataclass, field, fields as dc_fields, MISSING as _MISSING
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 import json as _json
@@ -33,6 +33,7 @@ class Field:
     default: Any | Callable[[], Any] | None = None  # noqa: B006
     primary_key: bool = False
     unique: bool = False
+    auto_increment: bool = False
     unique_for_date: str | None = None
     unique_for_month: str | None = None
     unique_for_year: str | None = None
@@ -53,6 +54,9 @@ class Field:
         if self.primary_key:
             self.null = False
             self.unique = True
+        # auto_increment implies the field is an identity/auto-generated column
+        if self.auto_increment and not self.primary_key:
+            self.null = False
 
     def __repr__(self) -> str:
         parts = []
@@ -94,13 +98,18 @@ class Field:
         """Return normalised choices as a list of 2-tuples."""
         if self.choices is None:
             return []
-        raw = self.choices() if callable(self.choices) else list(self.choices)
+        raw = self.choices() if callable(self.choices) else self.choices
         result: list[tuple[str, str]] = []
-        for item in raw:
-            if isinstance(item, (list, tuple)) and len(item) == 2:
-                result.append(tuple(item))  # type: ignore[arg-type]
-            elif isinstance(item, str):
-                result.append((item, item.replace("_", " ").title()))
+        # Handle dict/mapping format: {value: label}
+        if isinstance(raw, dict):
+            for key, label in raw.items():
+                result.append((str(key), str(label)))
+        else:
+            for item in raw:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    result.append(tuple(item))  # type: ignore[arg-type]
+                elif isinstance(item, str):
+                    result.append((item, item.replace("_", " ").title()))
         return result
 
     # ------------------------------------------------------------------
@@ -115,44 +124,28 @@ class Field:
         """Return (path, attr_name, positional_args, keyword_args) for migrations.
 
         This mirrors django.db.models.Field.deconstruct().
+        Walk the MRO so that subclass-specific defaults are respected.
         """
         path = f"{self.__class__.__module__}.{self.__class__.__qualname__}"
         attr_name = self.name or ""
         args: list[tuple[str, Any]] = []
         kwargs: dict[str, Any] = {}
 
-        # Collect all non-default keyword args
-        defaults = {
-            "name": None,
-            "null": False,
-            "blank": False,
-            "default": None,
-            "primary_key": False,
-            "unique": False,
-            "unique_for_date": None,
-            "unique_for_month": None,
-            "unique_for_year": None,
-            "choices": None,
-            "db_column": None,
-            "db_comment": None,
-            "db_default": None,
-            "db_index": False,
-            "db_tablespace": None,
-            "editable": True,
-            "error_messages": None,
-            "help_text": "",
-            "verbose_name": None,
-            "validators": [],
-            "serialize": True,
-        }
+        # Build defaults by walking MRO so that the most-derived class's
+        # defaults take precedence over parent classes.
+        defaults: dict[str, Any] = {}
+        for cls in self.__class__.__mro__:
+            for dc_f_name, dc_f in getattr(cls, "__dataclass_fields__", {}).items():
+                if dc_f_name not in defaults:
+                    if dc_f.default is not _MISSING:
+                        defaults[dc_f_name] = dc_f.default
+                    # no default_factory for our fields, skip that branch
 
         for key, default_val in defaults.items():
-            val = getattr(self, key, default_val)
+            val = getattr(self, key, None)
             if val != default_val:
                 kwargs[key] = val
 
-        # Exclude choices from kwargs (handled separately in migrations)
-        # but keep it for completeness
         return path, attr_name, args, kwargs
 
 
@@ -434,6 +427,10 @@ class BooleanField(Field):
     """
 
     null: bool = False  # override: BooleanField never stores NULL
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.null = False
 
     def python_value(self, value: Any) -> bool:
         if value is None:

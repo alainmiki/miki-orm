@@ -11,25 +11,57 @@ from typing import Any, Callable, Type
 from .fields import Field
 
 
-def _do_nothing() -> None:
-    """No-op on_delete handler (prevents deletion by raising in real Django)."""
+# ---------------------------------------------------------------------------
+# on_delete handlers
+# ---------------------------------------------------------------------------
+# Mirrors django.db.models.deletion.CASCADE, SET_NULL, PROTECT, etc.
+
+def CASCADE() -> None:
+    """Cascade deletion: delete the referencing object too.
+
+    In a full ORM this triggers a recursive delete.  Here it serves as
+    a marker; the actual deletion logic lives in the Session/UnitOfWork.
+    """
 
 
-def cascade() -> None:
-    """Cascade deletion marker (conceptual; real enforcement is DB-level)."""
+def SET_NULL() -> None:
+    """Set the FK to NULL on deletion of the referenced object.
+
+    Requires the FK field to have ``null=True``.
+    """
 
 
-def set_null() -> None:
-    """Set FK to NULL on deletion."""
+def SET_DEFAULT() -> None:
+    """Set the FK to its default value on deletion of the referenced object.
+
+    Requires the FK field to have a ``default`` defined.
+    """
 
 
-def set_default() -> None:
-    """Set FK to default value on deletion."""
+def PROTECT() -> None:
+    """Prevent deletion of the referenced object.
+
+    Raises ``ProtectedError`` at the session/unit-of-work level.
+    """
 
 
-def protect() -> None:
-    """Prevent deletion of the referenced object."""
+def DO_NOTHING() -> None:
+    """Take no action; rely on database integrity constraints.
 
+    This may cause IntegrityError at the database level.
+    """
+
+
+def SET(value: Any) -> None:
+    """Set the FK to *value* on deletion of the referenced object.
+
+    *value* can be a concrete value or a callable that returns one.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Relationship fields
+# ---------------------------------------------------------------------------
 
 @dataclass
 class ForeignKey(Field):
@@ -41,7 +73,7 @@ class ForeignKey(Field):
     """
 
     to: str = ""
-    on_delete: Callable[[], None] = cascade
+    on_delete: Callable[[], None] = CASCADE
     related_name: str | None = None
     related_query_name: str | None = None
     to_field: str | None = None
