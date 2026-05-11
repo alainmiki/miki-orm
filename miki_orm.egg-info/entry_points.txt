@@ -1,0 +1,4 @@
+[console_scripts]
+makemigrations = myorm.migrations.engine:main
+migrate = myorm.migrations.engine:main
+rollback = myorm.migrations.engine:main

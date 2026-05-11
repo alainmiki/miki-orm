@@ -1,0 +1,11 @@
+psycopg2-binary<3.0,>=2.9
+pymysql<2.0,>=1.0
+PyYAML>=6.0
+python-dotenv>=1.1
+typing_extensions>=4.8
+
+[dev]
+pytest>=8.0
+mkdocs>=1.5
+ruff>=0.0
+black>=24.3
