@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Dict, Type
 
 from .fields import AutoField, Field
 from .meta import MetaOptions
 from .registry import ModelRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class ObjectDoesNotExist(Exception):
@@ -150,11 +153,17 @@ class Model(metaclass=ModelMeta):
         return "id", self._meta.fields["id"]
 
     def _build_insert(self) -> tuple[str, list[Any]]:
-        """Build INSERT SQL and params."""
+        """Build INSERT SQL and params with safe identifier quoting."""
         from .fields import AutoField, DateTimeField
         from ..connections.base import get_param_placeholder
+        from ..query.safe_builder import get_safe_builder
+        from .. import settings
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        builder = get_safe_builder(engine)
+        
         cols: list[str] = []
         vals: list[Any] = []
 
@@ -173,24 +182,30 @@ class Model(metaclass=ModelMeta):
                 value = datetime.now()
                 setattr(self, name, value)
             db_value = field_obj.db_value(value)
-            cols.append(name)
+            cols.append(builder.quote_column(name))
             vals.append(db_value)
 
-        ph = get_param_placeholder()
+        ph = builder.param_placeholder
         placeholders = ", ".join(ph for _ in cols)
         col_names = ", ".join(cols)
-        sql = f"INSERT INTO {table} ({col_names}) VALUES ({placeholders})"
+        quoted_table = builder.quote_table(table)
+        sql = f"INSERT INTO {quoted_table} ({col_names}) VALUES ({placeholders})"
         return sql, vals
 
     def _build_update(self) -> tuple[str, list[Any]]:
-        """Build UPDATE SQL and params."""
+        """Build UPDATE SQL and params with safe identifier quoting."""
         from .fields import DateTimeField
-        from ..connections.base import get_param_placeholder
+        from ..query.safe_builder import get_safe_builder
+        from .. import settings
 
         pk_name, pk_field = self._get_pk_field()
         pk_value = pk_field.db_value(getattr(self, pk_name, None))
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        builder = get_safe_builder(engine)
+        
         sets: list[str] = []
         vals: list[Any] = []
 
@@ -203,23 +218,27 @@ class Model(metaclass=ModelMeta):
                 value = datetime.now()
                 setattr(self, name, value)
             db_value = field_obj.db_value(value)
-            ph = get_param_placeholder()
-            sets.append(f"{name} = {ph}")
+            ph = builder.param_placeholder
+            quoted_col = builder.quote_column(name)
+            sets.append(f"{quoted_col} = {ph}")
             vals.append(db_value)
 
         vals.append(pk_value)
-        ph = get_param_placeholder()
-        sql = f"UPDATE {table} SET {', '.join(sets)} WHERE {pk_name} = {ph}"
+        ph = builder.param_placeholder
+        quoted_pk = builder.quote_column(pk_name)
+        quoted_table = builder.quote_table(table)
+        sql = f"UPDATE {quoted_table} SET {', '.join(sets)} WHERE {quoted_pk} = {ph}"
         return sql, vals
 
     def save(self, connection: Any = None, *, force_insert: bool = False) -> None:
-        """Persist the model instance to the database."""
+        """Persist the model instance to the database with proper error handling."""
         conn = connection or self._get_connection()
         self._ensure_table_exists(conn)
 
         if not self._saved or force_insert:
             try:
                 sql, params = self._build_insert()
+                logger.debug(f"Executing INSERT: {sql} with params: {params}")
                 cursor = conn.execute(sql, params)
                 # Capture auto-generated PK from cursor if available
                 if hasattr(cursor, "lastrowid") and cursor.lastrowid:
@@ -227,14 +246,20 @@ class Model(metaclass=ModelMeta):
                     setattr(self, pk_name, cursor.lastrowid)
                 conn.commit()
                 self._saved = True
+                logger.info(f"Inserted {self.__class__.__name__} with pk={self.pk}")
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    f"INSERT failed for {self.__class__.__name__}: {e}. "
+                    f"Attempting UPDATE instead."
+                )
 
         sql, params = self._build_update()
+        logger.debug(f"Executing UPDATE: {sql} with params: {params}")
         cursor = conn.execute(sql, params)
         conn.commit()
         self._saved = True
+        logger.info(f"Updated {self.__class__.__name__} with pk={self.pk}")
 
     _table_created: bool = False
 
@@ -247,10 +272,18 @@ class Model(metaclass=ModelMeta):
             AutoField, FloatField, DecimalField, DurationField, DateTimeField, DateField, \
             TimeField, UUIDField, JSONField, BinaryField, EmailField, URLField, SlugField, \
             GenericIPAddressField, FilePathField
+        from ..query.safe_builder import get_safe_builder
+        from .. import settings
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        builder = get_safe_builder(engine)
+        quoted_table = builder.quote_table(table)
+        
         col_defs: list[str] = []
         for fname, fobj in self._meta.fields.items():
+            quoted_col = builder.quote_column(fname)
             if isinstance(fobj, AutoField) or (fobj.primary_key and isinstance(fobj, (IntegerField, AutoField))):
                 sql_type = "INTEGER"
                 constraints = ["PRIMARY KEY", "AUTOINCREMENT"]
@@ -323,30 +356,42 @@ class Model(metaclass=ModelMeta):
             if fobj.unique:
                 constraints.append("UNIQUE")
 
-            col_def = f"    {fname} {sql_type} {' '.join(constraints)}"
+            col_def = f"    {quoted_col} {sql_type} {' '.join(constraints)}"
             col_defs.append(col_def)
 
-        sql = f"CREATE TABLE IF NOT EXISTS {table} (\n{',\n'.join(col_defs)}\n)"
+        sql = f"CREATE TABLE IF NOT EXISTS {quoted_table} (\n{',\n'.join(col_defs)}\n)"
         try:
+            logger.debug(f"Creating table: {sql}")
             connection.execute(sql, ())
             connection.commit()
             self.__class__._table_created = True
+            logger.info(f"Created table {quoted_table} for {self.__class__.__name__}")
         except Exception as e:
-            print(f"Warning: could not create table {table}: {e}")
+            logger.error(f"Failed to create table {quoted_table}: {e}", exc_info=True)
 
     def delete(self, connection: Any = None) -> None:
-        """Delete the model instance from the database."""
-        from ..connections.base import get_param_placeholder
+        """Delete the model instance from the database with safe identifier quoting."""
+        from ..query.safe_builder import get_safe_builder
+        from .. import settings
 
         conn = connection or self._get_connection()
         pk_name, pk_field = self._get_pk_field()
         pk_value = pk_field.db_value(getattr(self, pk_name, None))
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
-        ph = get_param_placeholder()
-        sql = f"DELETE FROM {table} WHERE {pk_name} = {ph}"
+        
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        builder = get_safe_builder(engine)
+        quoted_table = builder.quote_table(table)
+        quoted_pk = builder.quote_column(pk_name)
+        ph = builder.param_placeholder
+        
+        sql = f"DELETE FROM {quoted_table} WHERE {quoted_pk} = {ph}"
+        logger.debug(f"Executing DELETE: {sql} with pk={pk_value}")
         conn.execute(sql, (pk_value,))
         conn.commit()
         self._saved = False
+        logger.info(f"Deleted {self.__class__.__name__} with pk={pk_value}")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a dict mapping field names to their Python values."""

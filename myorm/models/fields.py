@@ -659,7 +659,6 @@ class DurationField(Field):
     """
 
     def python_value(self, value: Any) -> timedelta | None:
-        print(f"python value:{value}")
         if value is None:
             return None if self.null else timedelta(0)
         if not isinstance(value,timedelta):
@@ -672,7 +671,6 @@ class DurationField(Field):
         )
 
     def db_value(self, value: Any) -> int | None:
-        print(f"db value:{value}")
         if value is None:
             return None if self.null else 0
         return int(value.total_seconds() * 1_000_000)

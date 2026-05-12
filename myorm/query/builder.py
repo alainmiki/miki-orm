@@ -2,45 +2,43 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from ..connections.base import get_param_placeholder
+from .safe_builder import get_safe_builder
+from .. import settings
+
+logger = logging.getLogger(__name__)
 
 
 class QueryBuilder:
-    """Builds SQL strings from QuerySet definitions."""
+    """Builds SQL strings from QuerySet definitions with safe identifier quoting."""
 
     def __init__(self, model: type[Any]) -> None:
         self.model = model
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        self.builder = get_safe_builder(engine)
 
     def build(self, queryset: Any, connection: Any = None) -> tuple[str, tuple[Any, ...]]:
+        """Build a safe SELECT query from a QuerySet."""
         table = self.model._meta.table_name or self.model.__name__.lower()
-        ph = get_param_placeholder()
-        sql = f"SELECT * FROM {table}"
+        quoted_table = self.builder.quote_table(table)
+        
+        sql = f"SELECT * FROM {quoted_table}"
         params: list[Any] = []
 
-        if queryset._filters:
-            conditions = []
-            for _, kwargs in queryset._filters:
-                for key, value in kwargs.items():
-                    conditions.append(f"{key} = {ph}")
-                    params.append(value)
-            if conditions:
-                sql += " WHERE " + " AND ".join(conditions)
+        # Build WHERE clause from filters and excludes
+        where, where_params = queryset._build_where_clause()
+        if where:
+            sql += where
+            params.extend(where_params)
 
-        if queryset._excludes:
-            excl_conditions = []
-            for _, kwargs in queryset._excludes:
-                for key, value in kwargs.items():
-                    excl_conditions.append(f"{key} != {ph}")
-                    params.append(value)
-            if excl_conditions:
-                if "WHERE" in sql:
-                    sql += " AND " + " AND ".join(excl_conditions)
-                else:
-                    sql += " WHERE " + " AND ".join(excl_conditions)
-
+        # Build ORDER BY clause
         if queryset._order_by:
-            sql += " ORDER BY " + ", ".join(queryset._order_by)
+            order_clause = self.builder.build_order_by(queryset._order_by)
+            if order_clause:
+                sql += " " + order_clause
 
+        logger.debug(f"Built query: {sql} with params: {params}")
         return sql, tuple(params)
