@@ -63,6 +63,50 @@ class TestPostgresAdapter:
         adapter = PostgresAdapter()
         assert isinstance(adapter, BaseAdapter)
 
+    def test_configured_database_properties(self):
+        """Postgres config should correctly parse host, port, user, password, dbname."""
+        import myorm
+        myorm.configure({
+            "default": {
+                "ENGINE": "postgresql",
+                "NAME": "test",
+                "USER": "postgres",
+                "PASSWORD": "admin",
+                "HOST": "localhost",
+                "PORT": 5432,
+            }
+        })
+        from myorm.settings import settings
+        db_config = settings.get_database("default")
+        assert db_config.name == "test"
+        assert db_config.user == "postgres"
+        assert db_config.password == "admin"
+        assert db_config.host == "localhost"
+        assert db_config.port == 5432
+        assert db_config.engine == "postgresql"
+
+    @pytest.mark.skip(reason="Requires a running PostgreSQL server")
+    def test_connect_to_postgres(self):
+        """Integration test: connect to a real PostgreSQL database."""
+        import myorm
+        from myorm.settings import connection_manager
+
+        myorm.configure({
+            "default": {
+                "ENGINE": "postgresql",
+                "NAME": "test",
+                "USER": "postgres",
+                "PASSWORD": "admin",
+                "HOST": "localhost",
+                "PORT": 5432,
+            }
+        })
+        conn = connection_manager.get_connection("default")
+        assert conn is not None
+        conn.execute("SELECT 1 as val")
+        row = conn.fetchone("SELECT 1 as val")
+        assert row == (1,)
+
 
 class TestMySQLAdapter:
     def test_module_imports(self):

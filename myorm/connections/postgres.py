@@ -10,6 +10,10 @@ from .base import BaseAdapter, BaseConnection
 
 
 class PostgresConnection(BaseConnection):
+    @property
+    def param_placeholder(self) -> str:
+        return "%s"
+
     def __init__(self, conn: psycopg2.extensions.connection) -> None:
         self._conn = conn
 

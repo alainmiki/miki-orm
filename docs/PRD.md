@@ -3,8 +3,15 @@
 ## Project
 **miki-orm** — Universal Django-style ORM for Python applications across web, desktop, mobile, and CLI.
 
-## Vision
-A framework-agnostic ORM package that delivers Django-like developer ergonomics while integrating cleanly with any Python library or framework. It supports both sync and async workflows, protects data integrity, and provides production-grade migrations, observability, and security.
+## Vision & Objectives
+A framework-agnostic ORM package that delivers Django-like developer ergonomics while integrating cleanly with any Python library or framework. It supports both sync and async workflows, protects data integrity, and provides production-grade migrations, observability, and security. 
+Provide a consistent, high-level API for database access across frameworks.
+
+Support multiple backends (PostgreSQL, MySQL, SQLite, MongoDB).
+
+Offer lazy evaluation, query builder, migrations, and unit of work.
+
+Achieve feature parity with Django ORM while remaining framework-agnostic.
 
 ## Goals
 - Build a consistent data access layer usable by Flask, FastAPI, Django, Pyramid, PyQt/PySide, Kivy, BeeWare, and CLI tools.
@@ -64,7 +71,7 @@ A framework-agnostic ORM package that delivers Django-like developer ergonomics 
    - Relationship helpers: `select_related()`, `prefetch_related()`.
 
 6. Query Builder
-   - AST nodes: `Eq`, `IContains`, `In`, `Range`, `Not`, `And`, `Or`, `OrderBy`, `Join`.
+   - AST nodes: `Eq`, `IContains`, `In`, `Range`, `Not`, `And`, `Or`, `OrderBy`, `Join`,`Contains`,`StartsWith`,`EndsWith` etc.
    - Fingerprinting via `QueryAST.to_dict()`.
    - SQL compilation with placeholder adaptation.
    - `compile_cached()` using LRU cache.

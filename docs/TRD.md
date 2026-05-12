@@ -418,7 +418,7 @@ Proposed package layout:
 - Add `uv.lock` to source control for reproducible dependency resolution.
 - Use `uv run` for commands rather than ad-hoc script execution.
 - Example developer commands:
-  - `uv install`
+  - `uv sync`
   - `uv run test`
   - `uv run docs`
   - `uv run lint`

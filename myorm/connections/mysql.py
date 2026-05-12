@@ -10,6 +10,10 @@ from .base import BaseAdapter, BaseConnection
 
 
 class MySQLConnection(BaseConnection):
+    @property
+    def param_placeholder(self) -> str:
+        return "%s"
+
     def __init__(self, conn: pymysql.connections.Connection) -> None:
         self._conn = conn
 

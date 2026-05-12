@@ -6,6 +6,8 @@ from typing import Any, Iterable
 
 from myorm.managers.base import Manager
 
+from .. import settings
+from ..connections.base import get_param_placeholder
 from ..models.base import Model
 from ..query.builder import QueryBuilder
 
@@ -22,11 +24,9 @@ class QuerySet:
         self._prefetch_related: list[str] = []
 
     def _get_connection(self) -> Any:
-        from .. import settings
+        from ..settings import connection_manager
 
-        db_config = settings.settings.get_database("default")
-        adapter = db_config.get_adapter()
-        return adapter.connect(db_config.get_connection_config())
+        return connection_manager.get_connection()
 
     def filter(self, *args: Any, **kwargs: Any) -> "QuerySet":
         self._filters.append(("AND", kwargs))
@@ -48,16 +48,18 @@ class QuerySet:
         self._prefetch_related.extend(related)
         return self
 
-    def _build_where_clause(self) -> tuple[str, list[Any]]:
+    def _build_where_clause(self, connection: Any = None) -> tuple[str, list[Any]]:
+        conn = connection or self._get_connection()
+        ph = get_param_placeholder()
         conditions: list[str] = []
         params: list[Any] = []
         for _, kwargs in self._filters:
             for key, value in kwargs.items():
-                conditions.append(f"{key} = ?")
+                conditions.append(f"{key} = {ph}")
                 params.append(value)
         for _, kwargs in self._excludes:
             for key, value in kwargs.items():
-                conditions.append(f"{key} != ?")
+                conditions.append(f"{key} != {ph}")
                 params.append(value)
         if conditions:
             return " WHERE " + " AND ".join(conditions), params
@@ -137,6 +139,25 @@ class QuerySet:
             obj = Manager(self.model).create(**create_kwargs)
             return obj, True
 
+    def update_or_create(
+        self,
+        defaults: dict[str, Any] | None = None,
+        connection: Any = None,
+        **kwargs: Any,
+    ) -> tuple[Model, bool]:
+        defaults = defaults or {}
+        try:
+            obj = self.get(connection=connection, **kwargs)
+            if defaults:
+                for key, value in defaults.items():
+                    setattr(obj, key, value)
+                obj.save()
+            return obj, False
+        except Exception:
+            create_kwargs = {**kwargs, **defaults}
+            obj = Manager(self.model).create(**create_kwargs)
+            return obj, True
+
     def create(self, connection: Any = None, **kwargs: Any) -> Model:
         obj = Manager(self.model).create(**kwargs)
         return obj
@@ -201,3 +222,6 @@ class QuerySet:
 
     def __bool__(self) -> bool:
         return self.exists()
+
+    def __len__(self) -> int:
+        return self.count()

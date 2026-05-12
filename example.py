@@ -23,14 +23,13 @@ class User(models.Model):
         table_name = "users"
 
 # Register the model (optional, for migrations)
-myorm.models.registry.ModelRegistry.register_model(User)
+myorm.register_model(User)
 
 # Example usage
 if __name__ == "__main__":
-    # Create tables via migration
-    engine = myorm.MigrationEngine()
-    engine.makemigrations([User])
-    engine.migrate()
+    # Create tables via migration without touching engine internals
+    myorm.makemigrations([User])
+    myorm.migrate()
 
     # Create a user
     user = User.objects.create(name="Alice", age=30)

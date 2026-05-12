@@ -9,6 +9,10 @@ from .base import BaseAdapter, BaseConnection
 
 
 class SQLiteConnection(BaseConnection):
+    @property
+    def param_placeholder(self) -> str:
+        return "?"
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 

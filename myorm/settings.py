@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 from typing import Any, Dict
 
@@ -72,17 +73,30 @@ class DatabaseConfig:
         return config
 
 
+
 class Settings:
     """Global settings container, similar to Django settings."""
 
     def __init__(self) -> None:
         self.databases: Dict[str, DatabaseConfig] = {}
         self.default_database = "default"
+        self.installed_apps: list[str] = []
 
     def configure_databases(self, databases: Dict[str, Dict[str, Any]]) -> None:
         """Configure databases from a dict like Django's DATABASES."""
         for alias, config in databases.items():
             self.databases[alias] = DatabaseConfig(config)
+
+    def install_app(self, app_name: str) -> None:
+        """Import and register an application module with models."""
+        if app_name in self.installed_apps:
+            return
+        importlib.import_module(app_name)
+        self.installed_apps.append(app_name)
+        try:
+            importlib.import_module(f"{app_name}.models")
+        except ModuleNotFoundError:
+            pass
 
     def get_database(self, name: str | None = None) -> DatabaseConfig:
         """Get database config by name."""

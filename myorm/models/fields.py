@@ -477,6 +477,17 @@ class DateTimeField(Field):
             return None if self.null else datetime.min
         if isinstance(value, datetime):
             return value
+        if isinstance(value, str):
+            # Parse ISO format strings returned by SQLite and other backends
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(value, fmt)
+                except ValueError:
+                    continue
+            raise TypeError(
+                f"Invalid value for DateTimeField: {value!r}. "
+                "Expected a datetime.datetime instance or ISO format string."
+            )
         raise TypeError(
             f"Invalid value for DateTimeField: {value!r}. "
             "Expected a datetime.datetime instance."
@@ -519,6 +530,16 @@ class DateField(Field):
             return None if self.null else date.min
         if isinstance(value, date):
             return value
+        if isinstance(value, str):
+            for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+                try:
+                    return datetime.strptime(value, fmt).date()
+                except ValueError:
+                    continue
+            raise TypeError(
+                f"Invalid value for DateField: {value!r}. "
+                "Expected a datetime.date instance or ISO format string."
+            )
         raise TypeError(
             f"Invalid value for DateField: {value!r}. "
             "Expected a datetime.date instance."
@@ -561,6 +582,16 @@ class TimeField(Field):
             return None if self.null else time.min
         if isinstance(value, time):
             return value
+        if isinstance(value, str):
+            for fmt in ("%H:%M:%S.%f", "%H:%M:%S", "%H:%M"):
+                try:
+                    return datetime.strptime(value, fmt).time()
+                except ValueError:
+                    continue
+            raise TypeError(
+                f"Invalid value for TimeField: {value!r}. "
+                "Expected a datetime.time instance or ISO format string."
+            )
         raise TypeError(
             f"Invalid value for TimeField: {value!r}. "
             "Expected a datetime.time instance."
@@ -628,8 +659,11 @@ class DurationField(Field):
     """
 
     def python_value(self, value: Any) -> timedelta | None:
+        print(f"python value:{value}")
         if value is None:
             return None if self.null else timedelta(0)
+        if not isinstance(value,timedelta):
+            return timedelta(microseconds=value)
         if isinstance(value, timedelta):
             return value
         raise TypeError(
@@ -638,6 +672,7 @@ class DurationField(Field):
         )
 
     def db_value(self, value: Any) -> int | None:
+        print(f"db value:{value}")
         if value is None:
             return None if self.null else 0
         return int(value.total_seconds() * 1_000_000)

@@ -50,6 +50,61 @@ Apply migrations:
 uv run migrate
 ```
 
+## Quickstart
+
+1. Configure your database:
+
+```python
+import myorm
+
+myorm.configure({
+    "default": {
+        "ENGINE": "sqlite",
+        "NAME": "mydb.db",
+    }
+})
+```
+
+2. Define models just like Django:
+
+```python
+from myorm import models
+
+class User(models.Model):
+    name = models.CharField(max_length=100)
+    age = models.IntegerField()
+
+    class Meta:
+        table_name = "users"
+```
+
+3. Register your model and run migrations:
+
+```python
+myorm.register_model(User)
+myorm.makemigrations([User])
+myorm.migrate()
+```
+
+### App registration
+
+If your application package contains a `models.py`, register the app instead of models one-by-one:
+
+```python
+myorm.install_app("my_app")
+myorm.makemigrations()
+myorm.migrate()
+```
+
+4. Use the Django-style manager API:
+
+```python
+user = User.objects.create(name="Alice", age=30)
+user, created = User.objects.get_or_create(name="Bob", defaults={"age": 25})
+user = User.objects.get(name="Alice")
+User.objects.all().delete()
+```
+
 ## Configuration
 
 Use a Django-like `DATABASES` dictionary in your application or environment loader.
@@ -75,4 +130,4 @@ DATABASES = {
 - `docs/TRD.md`
 
 ## CI
-GitHub Actions CI is configured in `.github/workflows/ci.yml` and validates SQLite, PostgreSQL, and async scenarios.
+GitHub Actions CI is configured in `.github/workflows/ci.yml` and validates SQLite and PostgreSQL sync scenarios.
