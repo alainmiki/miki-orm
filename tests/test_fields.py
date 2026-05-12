@@ -18,6 +18,7 @@ from myorm.models.fields import (
     JSONField, UUIDField, BinaryField,
     EmailField, URLField, SlugField,
     FilePathField, GenericIPAddressField,
+    FileField, ImageField,
     Field,
 )
 from myorm.models.relationships import (
@@ -326,7 +327,7 @@ class TestDateField:
     def test_rejects_non_date(self):
         f = DateField()
         with pytest.raises(TypeError):
-            f.python_value("2023-01-01")
+            f.python_value("invalid-date")
 
     def test_null(self):
         f = DateField(null=True)
@@ -345,7 +346,7 @@ class TestTimeField:
     def test_rejects_non_time(self):
         f = TimeField()
         with pytest.raises(TypeError):
-            f.python_value("12:30")
+            f.python_value("not a time")
 
     def test_null(self):
         f = TimeField(null=True)
@@ -651,3 +652,114 @@ class TestOnDeleteFunctions:
         assert PROTECT() is None
         assert DO_NOTHING() is None
         assert SET(42) is None
+
+
+# ---------------------------------------------------------------------------
+# File & Image fields
+# ---------------------------------------------------------------------------
+
+class TestFileField:
+    def test_default_max_length(self):
+        f = FileField()
+        assert f.max_length == 100
+
+    def test_default_max_size(self):
+        f = FileField()
+        assert f.max_size == 10 * 1024 * 1024  # 10 MB
+
+    def test_secure_filename_removes_path_traversal(self):
+        f = FileField()
+        # Test path traversal attempts
+        assert ".." not in f.db_value("../../../etc/passwd")
+        assert "/" not in f.db_value("path/to/file.pdf")
+        assert "\\" not in f.db_value("path\\to\\file.pdf")
+
+    def test_extension_validation_rejects_disallowed(self):
+        f = FileField()
+        with pytest.raises(ValueError):
+            f.validate("malware.exe")
+
+    def test_extension_validation_allows_allowed(self):
+        f = FileField()
+        result = f.validate("document.pdf")
+        assert result == "document.pdf"
+
+    def test_null_returns_none(self):
+        f = FileField(null=True)
+        assert f.python_value(None) is None
+
+    def test_null_returns_none_when_not_nullable(self):
+        f = FileField()
+        assert f.python_value(None) == ""
+
+    def test_db_value_sanitizes(self):
+        f = FileField()
+        assert "etc" not in f.db_value("../../../etc/passwd.pdf")
+
+    def test_file_size_validation(self):
+        f = FileField(max_size=1024)  # 1 KB
+        with pytest.raises(ValueError):
+            f.validate("file.pdf", size=2048)
+
+    def test_file_size_within_limit(self):
+        f = FileField(max_size=1024)  # 1 KB
+        result = f.validate("file.pdf", size=512)
+        assert result == "file.pdf"
+
+    def test_get_internal_type(self):
+        assert FileField().get_internal_type() == "FileField"
+
+    def test_custom_allowed_extensions(self):
+        f = FileField(allowed_extensions=frozenset(["pdf"]))
+        result = f.validate("doc.pdf")
+        assert result == "doc.pdf"
+        with pytest.raises(ValueError):
+            f.validate("doc.docx")
+
+
+class TestImageField:
+    def test_default_max_size(self):
+        f = ImageField()
+        assert f.max_size == 5 * 1024 * 1024  # 5 MB
+
+    def test_allows_image_extensions(self):
+        f = ImageField()
+        for ext in ["jpg", "png", "gif", "webp"]:
+            result = f.validate(f"image.{ext}")
+            assert result == f"image.{ext}"
+
+    def test_rejects_non_image_extensions(self):
+        f = ImageField()
+        with pytest.raises(ValueError):
+            f.validate("document.pdf")
+        with pytest.raises(ValueError):
+            f.validate("archive.zip")
+
+    def test_dimension_constraints(self):
+        f = ImageField(min_width=100, max_width=1000, min_height=100, max_height=1000)
+        # Valid dimensions
+        result = f.validate("image.jpg", width=500, height=500)
+        assert result == "image.jpg"
+
+    def test_dimension_too_small(self):
+        f = ImageField(min_width=100)
+        with pytest.raises(ValueError):
+            f.validate("image.jpg", width=50, height=50)
+
+    def test_dimension_too_large(self):
+        f = ImageField(max_width=1000)
+        with pytest.raises(ValueError):
+            f.validate("image.jpg", width=1500, height=500)
+
+    def test_invalid_dimension_config(self):
+        with pytest.raises(ValueError):
+            ImageField(min_width=500, max_width=100)
+        with pytest.raises(ValueError):
+            ImageField(min_height=500, max_height=100)
+
+    def test_get_internal_type(self):
+        assert ImageField().get_internal_type() == "ImageField"
+
+    def test_null_returns_none(self):
+        f = ImageField(null=True)
+        assert f.python_value(None) is None

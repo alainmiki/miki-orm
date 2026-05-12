@@ -266,10 +266,23 @@ class QuerySet:
 
     def values(self, *fields: str) -> list[dict[str, Any]]:
         conn = self._get_connection()
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        builder = get_safe_builder(engine)
+        
         table = self.model._meta.table_name or self.model.__name__.lower()
-        cols = ", ".join(fields) if fields else "*"
-        sql = f"SELECT {cols} FROM {table}"
-        rows = conn.fetchall(sql, ())
+        quoted_table = builder.quote_table(table)
+        
+        if fields:
+            quoted_cols = [builder.quote_column(f) for f in fields]
+            cols = ", ".join(quoted_cols)
+        else:
+            cols = "*"
+        
+        where, params = self._build_where_clause()
+        sql = f"SELECT {cols} FROM {quoted_table}{where}"
+        rows = conn.fetchall(sql, params)
+        
         result: list[dict[str, Any]] = []
         for row in rows:
             if isinstance(row, dict):
@@ -280,10 +293,23 @@ class QuerySet:
 
     def values_list(self, *fields: str) -> list[tuple[Any, ...]]:
         conn = self._get_connection()
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        builder = get_safe_builder(engine)
+        
         table = self.model._meta.table_name or self.model.__name__.lower()
-        cols = ", ".join(fields) if fields else "*"
-        sql = f"SELECT {cols} FROM {table}"
-        rows = conn.fetchall(sql, ())
+        quoted_table = builder.quote_table(table)
+        
+        if fields:
+            quoted_cols = [builder.quote_column(f) for f in fields]
+            cols = ", ".join(quoted_cols)
+        else:
+            cols = "*"
+        
+        where, params = self._build_where_clause()
+        sql = f"SELECT {cols} FROM {quoted_table}{where}"
+        rows = conn.fetchall(sql, params)
+        
         result: list[tuple[Any, ...]] = []
         for row in rows:
             if isinstance(row, dict):

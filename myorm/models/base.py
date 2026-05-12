@@ -4,38 +4,28 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, Type
+from typing import Any
 
 from .fields import AutoField, Field
 from .meta import MetaOptions
 from .registry import ModelRegistry
+from .relationships import ManyToManyField
 
 logger = logging.getLogger(__name__)
 
 
 class ObjectDoesNotExist(Exception):
     """Raised when a query does not return any results."""
-
     pass
 
 
 class MultipleObjectsReturned(Exception):
     """Raised when a query returns more than one result when only one was expected."""
-
     pass
 
 
 class ModelMeta(type):
-    """Metaclass that collects field definitions and builds _meta.
-
-    Walks the class namespace, finds every Field instance, calls its
-    ``__post_init__`` (since dataclasses don't do this when the instance
-    is created at class-scope), sets ``field.name``, and populates
-    ``cls._meta.fields``.
-
-    Also reads the inner ``Meta`` class and forwards its attributes to
-    the ``MetaOptions`` instance.
-    """
+    """Metaclass that collects field definitions and builds _meta."""
 
     def __new__(
         mcs,
@@ -43,8 +33,7 @@ class ModelMeta(type):
         bases: tuple[type, ...],
         namespace: dict[str, Any],
     ) -> type:
-        # Build MetaOptions from the inner ``Meta`` class, if present
-        meta_attrs: dict[str, Any] = {}
+        meta_attrs = {}
         meta_cls = namespace.get("Meta")
         if meta_cls is not None:
             for attr in (
@@ -58,82 +47,103 @@ class ModelMeta(type):
                 if hasattr(meta_cls, attr):
                     meta_attrs[attr] = getattr(meta_cls, attr)
 
-        # Collect all Field instances declared directly on this class
-        fields: dict[str, Field] = {}
+        fields = {}
+        # Replace ManyToManyField with descriptor before class creation
+        from .relationships import ManyToManyField
+
+        class _M2MDescriptor:
+            """Descriptor that returns a ManyToManyManager on instance access."""
+            def __init__(self, field: ManyToManyField) -> None:
+                self.field = field
+
+            def __get__(self, instance: Any, owner: Any):
+                if instance is None:
+                    return self.field
+                from .m2m import ManyToManyManager
+                return ManyToManyManager(instance, self.field)
+
+            def __set__(self, instance: Any, value: Any) -> None:
+                raise AttributeError("Cannot assign to ManyToManyField directly. Use manager methods (add, remove, clear).")
+
         for key, value in list(namespace.items()):
             if isinstance(value, Field):
                 value.name = key
-                # Calling __post_init__ again is safe because we have
-                # already set .name; dataclass already called it once
-                # during field instantiation at class-scope, but some
-                # subclasses (DateTimeField etc.) need it after .name
-                # is available.
                 if hasattr(value, "__post_init__"):
                     value.__post_init__()
                 fields[key] = value
+                if isinstance(value, ManyToManyField):
+                    # Install descriptor in the class namespace
+                    namespace[key] = _M2MDescriptor(value)
 
-        # Create the class
         cls = super().__new__(mcs, name, bases, namespace)
 
-        # Skip everything for the abstract base Model itself
         if name != "Model":
-            # Inherit fields from parent classes
             for base in bases:
                 if hasattr(base, "_meta") and hasattr(base._meta, "fields"):
                     for fname, fobj in base._meta.fields.items():
                         if fname not in fields:
                             fields[fname] = fobj
 
-            # Auto-add an AutoField if no primary_key was declared
             has_pk = any(f.primary_key for f in fields.values())
             if not has_pk:
                 auto = AutoField()
                 auto.name = "id"
                 fields["id"] = auto
 
-            # Build and attach MetaOptions
             meta_options = MetaOptions(**meta_attrs)
             meta_options.fields = fields
             cls._meta = meta_options  # type: ignore[attr-defined]
 
-            # Attach default manager (supports custom managers defined on the class)
             from ..managers.base import Manager, ManagerDescriptor
-
-            # Check if user defined a custom manager in the class
-            has_custom_manager = False
-            for attr_name in namespace:
-                if isinstance(namespace[attr_name], Manager):
-                    has_custom_manager = True
-                    break
+            has_custom_manager = any(
+                isinstance(namespace.get(attr_name), Manager)
+                for attr_name in namespace
+            )
             if not has_custom_manager:
                 cls._default_manager = Manager(cls)
             cls.objects = ManagerDescriptor()  # type: ignore[assignment]
 
-            # Register
             ModelRegistry.register_model(cls)
+
+            # Install reverse ManyToMany descriptors for any M2M field on this model
+            # that defines a related_name. The descriptor is attached to the target model.
+            for fname, field in fields.items():
+                if isinstance(field, ManyToManyField) and field.related_name:
+                    # Determine target model class
+                    target = field.to
+                    if isinstance(target, str):
+                        from .registry import ModelRegistry
+                        target_cls = ModelRegistry.get_model(target)
+                        if target_cls is None:
+                            # Target not yet registered; skip for now; will be wired later
+                            continue
+                    else:
+                        target_cls = target
+                    from .m2m import ReverseManyToManyDescriptor
+                    setattr(target_cls, field.related_name, ReverseManyToManyDescriptor(field, cls))
+
+        return cls
 
         return cls
 
 
 class Model(metaclass=ModelMeta):
-    """Base model class with ORM-like behaviour.
+    """Base model class with ORM-like behaviour."""
 
-    After construction, ``self._meta`` contains a ``MetaOptions`` instance
-    whose ``fields`` dict maps field names to their ``Field`` objects.
-    """
-
-    _meta: MetaOptions  # set by ModelMeta.__new__
-    _saved: bool = False  # tracks whether this instance has been saved
+    _meta: MetaOptions
+    _saved: bool = False
 
     @property
     def pk(self) -> Any:
-        """Return the primary key value for this model instance."""
         pk_name, pk_field = self._get_pk_field()
         return getattr(self, pk_name, None)
 
     def __init__(self, **kwargs: Any) -> None:
-        """Initialise the model, calling ``python_value`` on each field."""
+        from .relationships import ManyToManyField
         for field_name, field_obj in self._meta.fields.items():
+            # Skip ManyToMany fields; they are managed via descriptor
+            if isinstance(field_obj, ManyToManyField):
+                continue
             value = kwargs.get(field_name, field_obj.default)
             if callable(value) and not isinstance(value, Field):
                 value = value()
@@ -142,20 +152,16 @@ class Model(metaclass=ModelMeta):
 
     def _get_connection(self) -> Any:
         from ..settings import connection_manager
-
         return connection_manager.get_connection()
 
     def _get_pk_field(self) -> tuple[str, Field]:
-        """Return (field_name, field_obj) for the primary key."""
         for name, field_obj in self._meta.fields.items():
             if field_obj.primary_key:
                 return name, field_obj
         return "id", self._meta.fields["id"]
 
     def _build_insert(self) -> tuple[str, list[Any]]:
-        """Build INSERT SQL and params with safe identifier quoting."""
         from .fields import AutoField, DateTimeField
-        from ..connections.base import get_param_placeholder
         from ..query.safe_builder import get_safe_builder
         from .. import settings
 
@@ -163,21 +169,18 @@ class Model(metaclass=ModelMeta):
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
-        
-        cols: list[str] = []
-        vals: list[Any] = []
+
+        cols = []
+        vals = []
 
         for name, field_obj in self._meta.fields.items():
-            # Skip auto fields on insert (they are generated by DB)
             if isinstance(field_obj, AutoField):
                 continue
             value = getattr(self, name, None)
-            # Handle auto_now_add: set to now if not yet set (datetime.min)
             if isinstance(field_obj, DateTimeField) and field_obj.auto_now_add:
                 if value is None or value == datetime.min:
                     value = datetime.now()
                     setattr(self, name, value)
-            # Handle auto_now: always set to now
             elif isinstance(field_obj, DateTimeField) and field_obj.auto_now:
                 value = datetime.now()
                 setattr(self, name, value)
@@ -193,7 +196,6 @@ class Model(metaclass=ModelMeta):
         return sql, vals
 
     def _build_update(self) -> tuple[str, list[Any]]:
-        """Build UPDATE SQL and params with safe identifier quoting."""
         from .fields import DateTimeField
         from ..query.safe_builder import get_safe_builder
         from .. import settings
@@ -205,15 +207,14 @@ class Model(metaclass=ModelMeta):
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
-        
-        sets: list[str] = []
-        vals: list[Any] = []
+
+        sets = []
+        vals = []
 
         for name, field_obj in self._meta.fields.items():
             if field_obj.primary_key:
                 continue
             value = getattr(self, name, None)
-            # Handle auto_now: always set to now on update
             if isinstance(field_obj, DateTimeField) and field_obj.auto_now:
                 value = datetime.now()
                 setattr(self, name, value)
@@ -224,54 +225,59 @@ class Model(metaclass=ModelMeta):
             vals.append(db_value)
 
         vals.append(pk_value)
-        ph = builder.param_placeholder
         quoted_pk = builder.quote_column(pk_name)
         quoted_table = builder.quote_table(table)
+        ph = builder.param_placeholder
         sql = f"UPDATE {quoted_table} SET {', '.join(sets)} WHERE {quoted_pk} = {ph}"
         return sql, vals
 
-    def save(self, connection: Any = None, *, force_insert: bool = False) -> None:
-        """Persist the model instance to the database with proper error handling."""
-        conn = connection or self._get_connection()
-        self._ensure_table_exists(conn)
+    def _execute_insert(self, connection: Any) -> None:
+        sql, params = self._build_insert()
+        logger.debug(f"Executing INSERT: {sql} with params: {params}")
+        cursor = connection.execute(sql, params)
+        if hasattr(cursor, "lastrowid") and cursor.lastrowid:
+            pk_name, _ = self._get_pk_field()
+            setattr(self, pk_name, cursor.lastrowid)
+        self._saved = True
+        logger.debug(f"Inserted {self.__class__.__name__} pk={self.pk}")
 
-        if not self._saved or force_insert:
-            try:
-                sql, params = self._build_insert()
-                logger.debug(f"Executing INSERT: {sql} with params: {params}")
-                cursor = conn.execute(sql, params)
-                # Capture auto-generated PK from cursor if available
-                if hasattr(cursor, "lastrowid") and cursor.lastrowid:
-                    pk_name, _ = self._get_pk_field()
-                    setattr(self, pk_name, cursor.lastrowid)
-                conn.commit()
-                self._saved = True
-                logger.info(f"Inserted {self.__class__.__name__} with pk={self.pk}")
-                return
-            except Exception as e:
-                logger.warning(
-                    f"INSERT failed for {self.__class__.__name__}: {e}. "
-                    f"Attempting UPDATE instead."
-                )
-
+    def _execute_update(self, connection: Any) -> None:
         sql, params = self._build_update()
         logger.debug(f"Executing UPDATE: {sql} with params: {params}")
-        cursor = conn.execute(sql, params)
-        conn.commit()
+        connection.execute(sql, params)
         self._saved = True
-        logger.info(f"Updated {self.__class__.__name__} with pk={self.pk}")
+        logger.debug(f"Updated {self.__class__.__name__} pk={self.pk}")
 
-    _table_created: bool = False
+    def _execute_delete(self, connection: Any) -> None:
+        pk_name, pk_field = self._get_pk_field()
+        pk_value = pk_field.db_value(getattr(self, pk_name, None))
+        table = self._meta.table_name or self.__class__.__name__.lower() + "s"
+
+        from ..query.safe_builder import get_safe_builder
+        from .. import settings
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        builder = get_safe_builder(engine)
+
+        quoted_table = builder.quote_table(table)
+        quoted_pk = builder.quote_column(pk_name)
+        ph = builder.param_placeholder
+        sql = f"DELETE FROM {quoted_table} WHERE {quoted_pk} = {ph}"
+        connection.execute(sql, (pk_value,))
+        self._saved = False
+        logger.debug(f"Deleted {self.__class__.__name__} pk={pk_value}")
 
     def _ensure_table_exists(self, connection: Any) -> None:
-        """Auto-create the table if it has not been created yet."""
         if self.__class__._table_created:
             return
-        from ..models.fields import CharField, TextField, BooleanField, IntegerField, \
-            BigIntegerField, SmallIntegerField, PositiveIntegerField, PositiveSmallIntegerField, \
-            AutoField, FloatField, DecimalField, DurationField, DateTimeField, DateField, \
-            TimeField, UUIDField, JSONField, BinaryField, EmailField, URLField, SlugField, \
+        from ..models.fields import (
+            CharField, TextField, BooleanField, IntegerField,
+            BigIntegerField, SmallIntegerField, PositiveIntegerField, PositiveSmallIntegerField,
+            AutoField, FloatField, DecimalField, DurationField, DateTimeField, DateField,
+            TimeField, UUIDField, JSONField, BinaryField, EmailField, URLField, SlugField,
             GenericIPAddressField, FilePathField
+        )
+        from ..models.relationships import ForeignKey, ManyToManyField
         from ..query.safe_builder import get_safe_builder
         from .. import settings
 
@@ -280,13 +286,279 @@ class Model(metaclass=ModelMeta):
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
         quoted_table = builder.quote_table(table)
-        
-        col_defs: list[str] = []
+
+        col_defs = []
         for fname, fobj in self._meta.fields.items():
+            # Skip virtual fields like ManyToManyField
+            if isinstance(fobj, ManyToManyField):
+                continue
             quoted_col = builder.quote_column(fname)
             if isinstance(fobj, AutoField) or (fobj.primary_key and isinstance(fobj, (IntegerField, AutoField))):
                 sql_type = "INTEGER"
                 constraints = ["PRIMARY KEY", "AUTOINCREMENT"]
+            elif isinstance(fobj, ForeignKey):
+                sql_type = "INTEGER"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, BigIntegerField):
+                sql_type = "BIGINT"
+                constraints = ["PRIMARY KEY"] if fobj.primary_key else ([] if fobj.null else ["NOT NULL"])
+            elif isinstance(fobj, (IntegerField, SmallIntegerField, PositiveIntegerField, PositiveSmallIntegerField)):
+                sql_type = "INTEGER"
+                constraints = []
+                if fobj.primary_key:
+                    constraints.append("PRIMARY KEY")
+                constraints.append("NOT NULL" if not fobj.null else "NULL")
+            elif isinstance(fobj, CharField):
+                ml = fobj.max_length or 255
+                sql_type = f"VARCHAR({ml})"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, TextField):
+                sql_type = "TEXT"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, BooleanField):
+                sql_type = "INTEGER"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL", "DEFAULT 0"]
+            elif isinstance(fobj, FloatField):
+                sql_type = "REAL"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, DecimalField):
+                sql_type = f"DECIMAL({fobj.max_digits}, {fobj.decimal_places})"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, DurationField):
+                sql_type = "BIGINT"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, DateTimeField):
+                sql_type = "DATETIME"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, DateField):
+                sql_type = "DATE"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, TimeField):
+                sql_type = "TIME"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, UUIDField):
+                sql_type = "VARCHAR(36)"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, JSONField):
+                sql_type = "TEXT"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, BinaryField):
+                sql_type = "BLOB"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, EmailField):
+                sql_type = f"VARCHAR({fobj.max_length})"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, URLField):
+                sql_type = f"VARCHAR({fobj.max_length})"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, SlugField):
+                sql_type = f"VARCHAR({fobj.max_length})"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, GenericIPAddressField):
+                sql_type = "VARCHAR(45)"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            elif isinstance(fobj, FilePathField):
+                sql_type = "VARCHAR(255)"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+            else:
+                sql_type = "TEXT"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
+
+            if fobj.unique:
+                constraints.append("UNIQUE")
+
+            col_def = f"    {quoted_col} {sql_type} {' '.join(constraints)}"
+            col_defs.append(col_def)
+
+        sql = f"CREATE TABLE IF NOT EXISTS {quoted_table} (\n{',\n'.join(col_defs)}\n)"
+        try:
+            logger.debug(f"Creating table: {sql}")
+            connection.execute(sql, ())
+            connection.commit()
+            self.__class__._table_created = True
+            logger.info(f"Created table {quoted_table} for {self.__class__.__name__}")
+        except Exception as e:
+            logger.error(f"Failed to create table {quoted_table}: {e}", exc_info=True)
+
+    def save(self, connection: Any = None, *, force_insert: bool = False) -> None:
+        """Persist this model instance.
+
+        When used within an atomic() block, changes are buffered and
+        committed as a single unit when the transaction exits. Outside
+        atomic(), each save commits immediately.
+        """
+        from ..unit_of_work.transaction import TransactionManager
+
+        tx = TransactionManager.get_current()
+        conn = connection or self._get_connection()
+
+        # Defer to unit of work if inside atomic
+        if tx is not None and tx.connection is conn:
+            if not self._saved or force_insert:
+                tx.tracker.register_new(self)
+            else:
+                tx.tracker.register_dirty(self)
+            return
+
+        # Immediate execution
+        self._ensure_table_exists(conn)
+        try:
+            if not self._saved or force_insert:
+                self._execute_insert(conn)
+            else:
+                self._execute_update(conn)
+        except Exception as e:
+            logger.warning(
+                f"INSERT failed for {self.__class__.__name__}: {e}. "
+                f"Attempting UPDATE instead."
+            )
+            self._execute_update(conn)
+        conn.commit()
+
+    def delete(self, connection: Any = None) -> None:
+        """Delete this model instance.
+
+        Inside an atomic() block, the deletion is deferred until commit.
+        """
+        from ..unit_of_work.transaction import TransactionManager
+
+        tx = TransactionManager.get_current()
+        conn = connection or self._get_connection()
+
+        if tx is not None and tx.connection is conn:
+            from .unit_of_work.tracker import UnitOfWorkTracker
+            tx.tracker.register_deleted(self)
+            return
+
+        self._execute_delete(conn)
+        conn.commit()
+
+    async def async_save(self, connection: Any = None, *, force_insert: bool = False) -> None:
+        """Asynchronously persist this model instance.
+
+        When used within an async with atomic() block, changes are buffered.
+        Outside atomic(), each save commits immediately.
+        """
+        from ..unit_of_work.transaction import AsyncTransactionManager
+        from ..settings import async_connection_manager
+
+        tx = AsyncTransactionManager.get_current()
+        conn = connection or await async_connection_manager.get_connection()
+
+        # Defer to unit of work if inside async atomic
+        if tx is not None and tx.connection is conn:
+            if not self._saved or force_insert:
+                tx.tracker.register_new(self)
+            else:
+                tx.tracker.register_dirty(self)
+            return
+
+        # Immediate execution
+        await self._async_ensure_table_exists(conn)
+        try:
+            if not self._saved or force_insert:
+                await self._async_execute_insert(conn)
+            else:
+                await self._async_execute_update(conn)
+        except Exception as e:
+            logger.warning(
+                f"INSERT failed for {self.__class__.__name__}: {e}. "
+                f"Attempting UPDATE instead."
+            )
+            await self._async_execute_update(conn)
+        await conn.commit()
+
+    async def async_delete(self, connection: Any = None) -> None:
+        """Asynchronously delete this model instance.
+
+        Inside an async atomic() block, the deletion is deferred until commit.
+        """
+        from ..unit_of_work.transaction import AsyncTransactionManager
+        from ..settings import async_connection_manager
+
+        tx = AsyncTransactionManager.get_current()
+        conn = connection or await async_connection_manager.get_connection()
+
+        if tx is not None and tx.connection is conn:
+            from .unit_of_work.tracker import UnitOfWorkTracker
+            tx.tracker.register_deleted(self)
+            return
+
+        await self._async_execute_delete(conn)
+        await conn.commit()
+
+    async def _async_execute_insert(self, connection: Any) -> None:
+        """Async version of _execute_insert."""
+        sql, params = self._build_insert()
+        logger.debug(f"Executing INSERT: {sql} with params: {params}")
+        cursor = await connection.execute(sql, params)
+        if hasattr(cursor, "lastrowid") and cursor.lastrowid:
+            pk_name, _ = self._get_pk_field()
+            setattr(self, pk_name, cursor.lastrowid)
+        self._saved = True
+        logger.debug(f"Inserted {self.__class__.__name__} pk={self.pk}")
+
+    async def _async_execute_update(self, connection: Any) -> None:
+        """Async version of _execute_update."""
+        sql, params = self._build_update()
+        logger.debug(f"Executing UPDATE: {sql} with params: {params}")
+        await connection.execute(sql, params)
+        self._saved = True
+        logger.debug(f"Updated {self.__class__.__name__} pk={self.pk}")
+
+    async def _async_execute_delete(self, connection: Any) -> None:
+        """Async version of _execute_delete."""
+        pk_name, pk_field = self._get_pk_field()
+        pk_value = pk_field.db_value(getattr(self, pk_name, None))
+        table = self._meta.table_name or self.__class__.__name__.lower() + "s"
+
+        from ..query.safe_builder import get_safe_builder
+        from .. import settings
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        builder = get_safe_builder(engine)
+
+        quoted_table = builder.quote_table(table)
+        quoted_pk = builder.quote_column(pk_name)
+        ph = builder.param_placeholder
+        sql = f"DELETE FROM {quoted_table} WHERE {quoted_pk} = {ph}"
+        await connection.execute(sql, (pk_value,))
+        self._saved = False
+        logger.debug(f"Deleted {self.__class__.__name__} pk={pk_value}")
+
+    async def _async_ensure_table_exists(self, connection: Any) -> None:
+        """Async version of _ensure_table_exists."""
+        if self.__class__._table_created:
+            return
+        from ..models.fields import (
+            CharField, TextField, BooleanField, IntegerField,
+            BigIntegerField, SmallIntegerField, PositiveIntegerField, PositiveSmallIntegerField,
+            AutoField, FloatField, DecimalField, DurationField, DateTimeField, DateField,
+            TimeField, UUIDField, JSONField, BinaryField, EmailField, URLField, SlugField,
+            GenericIPAddressField, FilePathField
+        )
+        from ..models.relationships import ForeignKey, ManyToManyField
+        from ..query.safe_builder import get_safe_builder
+        from .. import settings
+
+        table = self._meta.table_name or self.__class__.__name__.lower() + "s"
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        builder = get_safe_builder(engine)
+        quoted_table = builder.quote_table(table)
+
+        col_defs = []
+        for fname, fobj in self._meta.fields.items():
+            # Skip virtual fields like ManyToManyField
+            if isinstance(fobj, ManyToManyField):
+                continue
+            quoted_col = builder.quote_column(fname)
+            if isinstance(fobj, AutoField) or (fobj.primary_key and isinstance(fobj, (IntegerField, AutoField))):
+                sql_type = "INTEGER"
+                constraints = ["PRIMARY KEY", "AUTOINCREMENT"]
+            elif isinstance(fobj, ForeignKey):
+                sql_type = "INTEGER"
+                constraints = ["NOT NULL"] if not fobj.null else ["NULL"]
             elif isinstance(fobj, BigIntegerField):
                 sql_type = "BIGINT"
                 constraints = ["PRIMARY KEY"] if fobj.primary_key else ([] if fobj.null else ["NOT NULL"])
@@ -352,7 +624,6 @@ class Model(metaclass=ModelMeta):
                 sql_type = "TEXT"
                 constraints = ["NOT NULL" if not fobj.null else "NULL"]
 
-            # Add unique constraint
             if fobj.unique:
                 constraints.append("UNIQUE")
 
@@ -362,46 +633,19 @@ class Model(metaclass=ModelMeta):
         sql = f"CREATE TABLE IF NOT EXISTS {quoted_table} (\n{',\n'.join(col_defs)}\n)"
         try:
             logger.debug(f"Creating table: {sql}")
-            connection.execute(sql, ())
-            connection.commit()
+            await connection.execute(sql, ())
+            await connection.commit()
             self.__class__._table_created = True
             logger.info(f"Created table {quoted_table} for {self.__class__.__name__}")
         except Exception as e:
             logger.error(f"Failed to create table {quoted_table}: {e}", exc_info=True)
 
-    def delete(self, connection: Any = None) -> None:
-        """Delete the model instance from the database with safe identifier quoting."""
-        from ..query.safe_builder import get_safe_builder
-        from .. import settings
-
-        conn = connection or self._get_connection()
-        pk_name, pk_field = self._get_pk_field()
-        pk_value = pk_field.db_value(getattr(self, pk_name, None))
-        table = self._meta.table_name or self.__class__.__name__.lower() + "s"
-        
-        db_config = settings.databases.get("default")
-        engine = db_config.engine if db_config else "sqlite"
-        builder = get_safe_builder(engine)
-        quoted_table = builder.quote_table(table)
-        quoted_pk = builder.quote_column(pk_name)
-        ph = builder.param_placeholder
-        
-        sql = f"DELETE FROM {quoted_table} WHERE {quoted_pk} = {ph}"
-        logger.debug(f"Executing DELETE: {sql} with pk={pk_value}")
-        conn.execute(sql, (pk_value,))
-        conn.commit()
-        self._saved = False
-        logger.info(f"Deleted {self.__class__.__name__} with pk={pk_value}")
-
     def to_dict(self) -> dict[str, Any]:
-        """Return a dict mapping field names to their Python values."""
         return {name: getattr(self, name) for name in self._meta.fields}
 
     @classmethod
     def objects(cls) -> Any:
-        """Return a manager for this model."""
         from ..managers.base import Manager
-
         if not hasattr(cls, "_manager"):
             cls._manager = Manager(cls)
         return cls._manager

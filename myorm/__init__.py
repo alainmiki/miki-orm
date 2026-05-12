@@ -16,6 +16,7 @@ from .managers.base import Manager
 from .models.registry import ModelRegistry
 from .settings import configure, settings
 from .migrations.engine import MigrationEngine
+from .transactions import atomic, async_atomic, get_current_transaction
 
 
 def register_model(model: type[Model]) -> None:
@@ -63,6 +64,10 @@ __all__ = [
     "PROTECT",
     "DO_NOTHING",
     "SET",
+    "MigrationEngine",
+    "atomic",
+    "async_atomic",
+    "get_current_transaction",
 ]
 
 __version__ = "0.1.0"

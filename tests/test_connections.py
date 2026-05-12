@@ -145,8 +145,16 @@ class TestMigrationWithSQLite:
     """Test full migration flow with SQLite in-memory database."""
 
     def test_makemigrations_creates_file(self, tmp_path):
+        import myorm
         from myorm import models
         from myorm.migrations.engine import MigrationEngine
+
+        myorm.configure({
+            "default": {
+                "ENGINE": "sqlite",
+                "NAME": ":memory:"
+            }
+        })
 
         class TestModel(models.Model):
             id = models.IntegerField(primary_key=True, auto_increment=True)

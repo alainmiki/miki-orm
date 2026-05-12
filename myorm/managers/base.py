@@ -126,6 +126,86 @@ class Manager:
 
         return QuerySet(self.model).prefetch_related(*related)
 
+    # Async methods
+    async def async_all(self, connection: Any = None) -> list[Model]:
+        """Return all objects asynchronously."""
+        from .async_queryset import AsyncQuerySet
+        qs = AsyncQuerySet(self.model, connection=connection)
+        return await qs.all()
+
+    async def async_filter(self, *args: Any, connection: Any = None, **kwargs: Any) -> list[Model]:
+        """Filter objects asynchronously."""
+        from .async_queryset import AsyncQuerySet
+        qs = AsyncQuerySet(self.model, connection=connection).filter(*args, **kwargs)
+        return await qs.all()
+
+    async def async_get(self, *args: Any, connection: Any = None, **kwargs: Any) -> Model:
+        """Get a single object asynchronously."""
+        from .async_queryset import AsyncQuerySet
+        qs = AsyncQuerySet(self.model, connection=connection).filter(*args, **kwargs)
+        return await qs.get()
+
+    async def async_first(self, connection: Any = None) -> Model | None:
+        """Return first object or None asynchronously."""
+        from .async_queryset import AsyncQuerySet
+        qs = AsyncQuerySet(self.model, connection=connection)
+        return await qs.first()
+
+    async def async_last(self, connection: Any = None) -> Model | None:
+        """Return last object or None asynchronously."""
+        from .async_queryset import AsyncQuerySet
+        qs = AsyncQuerySet(self.model, connection=connection)
+        return await qs.last()
+
+    async def async_count(self, connection: Any = None) -> int:
+        """Count objects asynchronously."""
+        from .async_queryset import AsyncQuerySet
+        qs = AsyncQuerySet(self.model, connection=connection)
+        return await qs.count()
+
+    async def async_exists(self, connection: Any = None) -> bool:
+        """Check if any objects exist asynchronously."""
+        from .async_queryset import AsyncQuerySet
+        qs = AsyncQuerySet(self.model, connection=connection)
+        return await qs.exists()
+
+    async def async_create(self, connection: Any = None, **kwargs: Any) -> Model:
+        """Create and save a new object asynchronously."""
+        # This needs async object creation; defer to model async_save
+        obj = self.model(**kwargs)
+        await obj.async_save(connection=connection)
+        return obj
+
+    async def async_get_or_create(
+        self, defaults: dict[str, Any] | None = None, connection: Any = None, **kwargs: Any
+    ) -> tuple[Model, bool]:
+        """Get or create object asynchronously (stub)."""
+        raise NotImplementedError("async_get_or_create not yet implemented")
+
+    async def async_update(self, connection: Any = None, **values: Any) -> int:
+        """Update all matching objects asynchronously."""
+        from .async_queryset import AsyncQuerySet
+        qs = AsyncQuerySet(self.model, connection=connection)
+        return await qs.update(**values)
+
+    async def async_values(self, *fields: str, connection: Any = None) -> list[dict[str, Any]]:
+        """Return values as dictionaries asynchronously."""
+        from .async_queryset import AsyncQuerySet
+        qs = AsyncQuerySet(self.model, connection=connection)
+        return await qs.values(*fields)
+
+    async def async_values_list(self, *fields: str, connection: Any = None) -> list[tuple[Any, ...]]:
+        """Return values as tuples asynchronously."""
+        from .async_queryset import AsyncQuerySet
+        qs = AsyncQuerySet(self.model, connection=connection)
+        return await qs.values_list(*fields)
+
+    async def async_select_related(self, *related: str, connection: Any = None) -> list[Model]:
+        """Fetch related objects in a single query asynchronously."""
+        from .async_queryset import AsyncQuerySet
+        qs = AsyncQuerySet(self.model, connection=connection).select_related(*related)
+        return await qs.all()
+
 
 class ManagerDescriptor:
     """Descriptor that returns the Manager instance for a model class.

@@ -9,14 +9,18 @@ Requires-Python: >=3.14
 Description-Content-Type: text/markdown
 Requires-Dist: psycopg2-binary<3.0,>=2.9
 Requires-Dist: pymysql<2.0,>=1.0
+Requires-Dist: aiosqlite<0.19,>=0.18
+Requires-Dist: asyncpg<0.31,>=0.29
 Requires-Dist: PyYAML>=6.0
 Requires-Dist: python-dotenv>=1.1
 Requires-Dist: typing_extensions>=4.8
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.22; extra == "dev"
 Requires-Dist: mkdocs>=1.5; extra == "dev"
 Requires-Dist: ruff>=0.0; extra == "dev"
 Requires-Dist: black>=24.3; extra == "dev"
+Requires-Dist: uv>=2.0; extra == "dev"
 
 # miki-orm
 
@@ -38,76 +42,91 @@ Universal Django-style ORM for Python applications.
 - Universal config style for database credentials and settings.
 - Production-minded security and scalability patterns.
 
-## Quickstart
+## Getting started
 
-1. Install with uv:
-
-```bash
-uv sync --extra dev
-```
-
-2. Configure your database:
-
-```python
-from myorm import configure
-
-configure({
-    "database": {
-        "engine": "sqlite",  # or "postgres", "mysql"
-        "name": "mydb.db"
-    }
-})
-```
-
-3. Define a model:
-
-```python
-from myorm import Model, IntegerField, CharField
-
-class User(Model):
-    id = IntegerField(primary_key=True, auto_increment=True)
-    name = CharField(max_length=100)
-    age = IntegerField()
-
-    class Meta:
-        table_name = "users"
-```
-
-4. Generate and apply migrations:
+Install development dependencies:
 
 ```bash
-makemigrations
-migrate
+uv install
 ```
-
-5. Use the model:
-
-```python
-user = User(name="Alice", age=30)
-user.save()
-
-users = User.objects.filter(age__gt=25)
-```
-
-## Development
 
 Run tests:
 
 ```bash
-uv run pytest tests/
-```
-
-Lint:
-
-```bash
-uv run ruff check . && uv run black --check .
+uv run test
 ```
 
 Build docs:
 
 ```bash
-uv run mkdocs build
+uv run docs
 ```
+
+Generate migrations:
+
+```bash
+uv run makemigrations
+```
+
+Apply migrations:
+
+```bash
+uv run migrate
+```
+
+## Quickstart
+
+1. Configure your database:
+
+```python
+import myorm
+
+myorm.configure({
+    "default": {
+        "ENGINE": "sqlite",
+        "NAME": "mydb.db",
+    }
+})
+```
+
+2. Define models just like Django:
+
+```python
+from myorm import models
+
+class User(models.Model):
+    name = models.CharField(max_length=100)
+    age = models.IntegerField()
+
+    class Meta:
+        table_name = "users"
+```
+
+3. Register your model and run migrations:
+
+```python
+myorm.register_model(User)
+myorm.makemigrations([User])
+myorm.migrate()
+```
+
+### App registration
+
+If your application package contains a `models.py`, register the app instead of models one-by-one:
+
+```python
+myorm.install_app("my_app")
+myorm.makemigrations()
+myorm.migrate()
+```
+
+4. Use the Django-style manager API:
+
+```python
+user = User.objects.create(name="Alice", age=30)
+user, created = User.objects.get_or_create(name="Bob", defaults={"age": 25})
+user = User.objects.get(name="Alice")
+User.objects.all().delete()
 ```
 
 ## Configuration
@@ -135,4 +154,4 @@ DATABASES = {
 - `docs/TRD.md`
 
 ## CI
-GitHub Actions CI is configured in `.github/workflows/ci.yml` and validates SQLite, PostgreSQL, and async scenarios.
+GitHub Actions CI is configured in `.github/workflows/ci.yml` and validates SQLite and PostgreSQL sync scenarios.

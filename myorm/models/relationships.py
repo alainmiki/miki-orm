@@ -128,8 +128,18 @@ class ManyToManyField(Field):
     db_table: str | None = None
     swappable: bool = True
 
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+        # Lazy import to avoid circular
+        from .m2m import ManyToManyManager
+        return ManyToManyManager(instance, self)
+
+    def __set__(self, instance, value):
+        raise AttributeError("Cannot assign to ManyToManyField directly; use manager methods like .add()/.clear()")
+
     def python_value(self, value: Any) -> Any:
-        """Return a manager-like object (placeholder in this lightweight ORM)."""
+        """Return a manager-like object."""
         return value
 
     def db_value(self, value: Any) -> Any:
