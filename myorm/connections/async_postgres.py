@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import ssl
 import asyncpg
 from typing import Any, Dict, Iterable, Tuple
 
-from .base import BaseAsyncAdapter, BaseAsyncConnection
+from .base import BaseAsyncAdapter, BaseAsyncConnection, AsyncConnectionPool
 
 
 def _replace_placeholders(sql: str, param_count: int) -> str:
@@ -67,18 +69,34 @@ class AsyncPostgresConnection(BaseAsyncConnection):
 
 
 class AsyncPostgresAdapter(BaseAsyncAdapter):
+    def _build_ssl_context(self, ssl_config: Any) -> Any:
+        if not ssl_config:
+            return None
+        if isinstance(ssl_config, bool):
+            return ssl.create_default_context()
+        context = ssl.create_default_context(cafile=ssl_config.get("CAFILE"))
+        if ssl_config.get("CERTFILE") and ssl_config.get("KEYFILE"):
+            context.load_cert_chain(ssl_config.get("CERTFILE"), ssl_config.get("KEYFILE"))
+        return context
+
     async def connect(self, config: Dict[str, Any]) -> AsyncPostgresConnection:
+        ssl_context = self._build_ssl_context(config.get("SSL", {}))
         conn = await asyncpg.connect(
             database=config.get("NAME"),
             user=config.get("USER"),
             password=config.get("PASSWORD"),
             host=config.get("HOST", "localhost"),
             port=int(config.get("PORT", 5432)),
-            # SSL handling: if config has sslmode=require etc.
-            ssl=config.get("SSL", {}).get("enabled", False),
+            ssl=ssl_context,
         )
         return AsyncPostgresConnection(conn)
 
-    async def create_pool(self, config: Dict[str, Any]) -> AsyncPostgresConnection:
-        # For simplicity, use direct connection; a real pool would use asyncpg.create_pool
-        return await self.connect(config)
+    async def create_pool(self, config: Dict[str, Any], pool_config: Dict[str, Any] | None = None) -> AsyncConnectionPool:
+        pool_config = pool_config or {}
+        return AsyncConnectionPool(
+            self,
+            config,
+            min_size=pool_config.get("min_size", 1),
+            max_size=pool_config.get("max_size", 5),
+            timeout=pool_config.get("timeout", 30),
+        )

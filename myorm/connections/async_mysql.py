@@ -1,9 +1,10 @@
 """Async MySQL adapter using aiomysql."""
 
+import ssl
 import aiomysql
 from typing import Any, List, Tuple, Optional, Dict, Iterable
 
-from .base import BaseAsyncAdapter, BaseAsyncConnection
+from .base import BaseAsyncAdapter, BaseAsyncConnection, AsyncConnectionPool
 
 
 class AsyncMySQLConnection(BaseAsyncConnection):
@@ -49,8 +50,19 @@ class AsyncMySQLConnection(BaseAsyncConnection):
 class AsyncMySQLAdapter(BaseAsyncAdapter):
     """Async MySQL database adapter using aiomysql."""
 
+    def _build_ssl_context(self, ssl_config: Any) -> Any:
+        if not ssl_config:
+            return None
+        if isinstance(ssl_config, bool):
+            return ssl.create_default_context()
+        context = ssl.create_default_context(cafile=ssl_config.get("CAFILE"))
+        if ssl_config.get("CERTFILE") and ssl_config.get("KEYFILE"):
+            context.load_cert_chain(ssl_config.get("CERTFILE"), ssl_config.get("KEYFILE"))
+        return context
+
     async def connect(self, config: Dict[str, Any]) -> AsyncMySQLConnection:
         """Create and return an async MySQL connection."""
+        ssl_context = self._build_ssl_context(config.get("SSL", {}))
         conn = await aiomysql.connect(
             host=config.get("HOST", "localhost"),
             port=int(config.get("PORT", 3306)),
@@ -58,10 +70,17 @@ class AsyncMySQLAdapter(BaseAsyncAdapter):
             password=config.get("PASSWORD", ""),
             db=config.get("NAME"),
             autocommit=True,
-            **config.get("OPTIONS", {})
+            ssl=ssl_context,
+            **config.get("OPTIONS", {}),
         )
         return AsyncMySQLConnection(conn)
 
-    async def create_pool(self, config: Dict[str, Any]) -> AsyncMySQLConnection:
-        # For simplicity, return direct connection without pooling
-        return await self.connect(config)
+    async def create_pool(self, config: Dict[str, Any], pool_config: Dict[str, Any] | None = None) -> AsyncConnectionPool:
+        pool_config = pool_config or {}
+        return AsyncConnectionPool(
+            self,
+            config,
+            min_size=pool_config.get("min_size", 1),
+            max_size=pool_config.get("max_size", 5),
+            timeout=pool_config.get("timeout", 30),
+        )

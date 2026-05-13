@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from .base import Model
 
 from ..query.safe_builder import get_safe_builder
-from .. import settings
+from ..settings import settings
 
 
 def _get_through_table(instance, field_name: str, field) -> str:

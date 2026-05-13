@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator
 from ..models.base import Model, ObjectDoesNotExist, MultipleObjectsReturned
 from ..query.builder import QueryBuilder
 from ..query.safe_builder import get_safe_builder
-from .. import settings
+from ..settings import settings
 
 
 class AsyncQuerySet:

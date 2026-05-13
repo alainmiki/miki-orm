@@ -190,6 +190,49 @@ class MigrationEngine:
             if not forward:
                 lines.append(f"    # DropIndex reverse requires saved index definition")
 
+    @staticmethod
+    def _build_create_table_sql(op: operations.CreateTable) -> tuple[str, list[Any]]:
+        """Build CREATE TABLE SQL from CreateTable operation."""
+        from ..query.safe_builder import get_safe_builder
+        from ..settings import settings as myorm_settings
+        
+        db_config = myorm_settings.get_database("default")
+        builder = get_safe_builder(db_config.engine)
+        
+        table_name = op.payload["name"]
+        columns = op.payload["columns"]
+        
+        quoted_table = builder.quote_table(table_name)
+        column_defs = []
+        params = []
+        
+        for col in columns:
+            col_name = col["name"]
+            field_type = col["field_type"]
+            quoted_col = builder.quote_column(col_name)
+            
+            # Get field class and build SQL type
+            module_path, class_name = field_type.rsplit(".", 1)
+            module = __import__(module_path, fromlist=[class_name])
+            field_class = getattr(module, class_name)
+            
+            # Create field instance with kwargs - filter to valid field arguments
+            field_kwargs = {k: v for k, v in col.items() if k not in ("name", "field_type", "type")}
+            field = field_class(**field_kwargs)
+            
+            # Use _SchemaEditor to get SQL type and constraints
+            schema_editor = _SchemaEditor(None, builder)
+            sql_type, constraints, field_params = schema_editor._field_to_sql(field)
+            params.extend(field_params)
+            
+            col_def = f"{quoted_col} {sql_type}"
+            if constraints:
+                col_def += " " + " ".join(constraints)
+            column_defs.append(col_def)
+        
+        sql = f"CREATE TABLE {quoted_table} ({', '.join(column_defs)})"
+        return sql, params
+
     # ------------------------------------------------------------------
     # Migration application (direct & transactional)
     # ------------------------------------------------------------------
@@ -397,6 +440,26 @@ class _SchemaEditor:
         quoted_col = self.builder.quote_column(column)
         sql_type, constraints, params = self._field_to_sql(field)
         
+        # For SQLite, DEFAULT can't be parameterized in ALTER TABLE ADD COLUMN
+        if self.builder.dialect == self.builder.dialect.SQLITE:
+            # Rebuild constraints without parameterized DEFAULT
+            constraints = []
+            if field.primary_key:
+                constraints.append("PRIMARY KEY")
+                if getattr(field, "auto_increment", False) or isinstance(field, AutoField):
+                    constraints.append("AUTOINCREMENT")
+            if not field.null:
+                constraints.append("NOT NULL")
+            else:
+                constraints.append("NULL")
+            if field.unique:
+                constraints.append("UNIQUE")
+            if field.default is not None:
+                # For SQLite ALTER TABLE, use literal default value
+                default_val = repr(field.default) if isinstance(field.default, str) else str(field.default)
+                constraints.append(f"DEFAULT {default_val}")
+            params = []  # No parameters for SQLite ALTER TABLE
+        
         sql = f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_col} {sql_type} {' '.join(constraints)}"
         return sql, params
 
@@ -501,6 +564,7 @@ class _SchemaEditor:
             BooleanField, DecimalField, FloatField, DateTimeField,
             DateField, TimeField, UUIDField, JSONField, BinaryField,
             EmailField, URLField, SlugField, AutoField,
+            SmallIntegerField, PositiveIntegerField, PositiveSmallIntegerField,
         )
         
         params: list[Any] = []

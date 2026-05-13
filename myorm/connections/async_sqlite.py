@@ -5,7 +5,7 @@ from __future__ import annotations
 import aiosqlite
 from typing import Any, Dict, Iterable, Tuple
 
-from .base import BaseAsyncAdapter, BaseAsyncConnection
+from .base import BaseAsyncAdapter, BaseAsyncConnection, AsyncConnectionPool
 
 
 class AsyncSQLiteConnection(BaseAsyncConnection):
@@ -48,6 +48,12 @@ class AsyncSQLiteAdapter(BaseAsyncAdapter):
         conn = await aiosqlite.connect(database)
         return AsyncSQLiteConnection(conn)
 
-    async def create_pool(self, config: Dict[str, Any]) -> AsyncSQLiteConnection:
-        # aiosqlite doesn't pool; return direct connection
-        return await self.connect(config)
+    async def create_pool(self, config: Dict[str, Any], pool_config: Dict[str, Any] | None = None) -> AsyncConnectionPool:
+        pool_config = pool_config or {}
+        return AsyncConnectionPool(
+            self,
+            config,
+            min_size=pool_config.get("min_size", 1),
+            max_size=pool_config.get("max_size", 5),
+            timeout=pool_config.get("timeout", 30),
+        )

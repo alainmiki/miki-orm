@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Dict
 
-from .base import BaseAdapter, BaseConnection
+from .base import BaseAdapter, BaseConnection, SyncConnectionPool
 
 
 class SQLiteConnection(BaseConnection):
@@ -33,6 +33,9 @@ class SQLiteConnection(BaseConnection):
     def rollback(self) -> None:
         self._conn.rollback()
 
+    def close(self) -> None:
+        self._conn.close()
+
 
 class SQLiteAdapter(BaseAdapter):
     def connect(self, config: Dict[str, Any]) -> SQLiteConnection:
@@ -40,6 +43,12 @@ class SQLiteAdapter(BaseAdapter):
         conn = sqlite3.connect(database, check_same_thread=False)
         return SQLiteConnection(conn)
 
-    def create_pool(self, config: Dict[str, Any]) -> SQLiteConnection:
-        # SQLite uses a lightweight connection wrapper for MVP.
-        return self.connect(config)
+    def create_pool(self, config: Dict[str, Any], pool_config: Dict[str, Any] | None = None) -> SyncConnectionPool:
+        pool_config = pool_config or {}
+        return SyncConnectionPool(
+            self,
+            config,
+            min_size=pool_config.get("min_size", 1),
+            max_size=pool_config.get("max_size", 5),
+            timeout=pool_config.get("timeout", 30),
+        )

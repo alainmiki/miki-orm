@@ -1120,3 +1120,12 @@ class ImageDescriptor(FileDescriptor):
     def __set__(self, obj: Any, value: Any) -> None:
         validated = self.field.validate(value)
         obj.__dict__[self.field.name] = validated
+
+
+# Relationship field re-exports for backwards-compatible imports
+try:
+    from .relationships import ForeignKey, ManyToManyField, OneToOneField
+except ImportError:  # pragma: no cover
+    ForeignKey = None  # type: ignore[assignment]
+    ManyToManyField = None  # type: ignore[assignment]
+    OneToOneField = None  # type: ignore[assignment]

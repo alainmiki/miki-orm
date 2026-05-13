@@ -48,6 +48,7 @@ class AddField(MigrationOperation):
             "field_type": path,
             "field_name": field_name,
             "field_kwargs": kwargs,
+            "field": field,  # Store the field object for schema editor
         }
         super().__init__()
         self.operation_type = "add_field"
@@ -66,6 +67,10 @@ class RemoveField(MigrationOperation):
         self.payload = payload
 
 
+# Compatibility alias for older naming
+DropField = RemoveField
+
+
 class AlterField(MigrationOperation):
     """Alter an existing field's definition."""
     
@@ -76,6 +81,7 @@ class AlterField(MigrationOperation):
             "field_type": path,
             "field_name": attr_name,
             "field_kwargs": kwargs,
+            "field": field,  # Store the field object for schema editor
         }
         super().__init__()
         self.operation_type = "alter_field"

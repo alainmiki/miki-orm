@@ -7,7 +7,7 @@ from typing import Any, Iterable
 
 from myorm.managers.base import Manager
 
-from .. import settings
+from ..settings import settings
 from ..connections.base import get_param_placeholder
 from ..models.base import Model, ObjectDoesNotExist, MultipleObjectsReturned
 from ..query.builder import QueryBuilder
@@ -204,6 +204,7 @@ class QuerySet:
                 f"update_or_create: Multiple {self.model.__name__} objects found for {kwargs}"
             )
             raise
+
 
     def create(self, connection: Any = None, **kwargs: Any) -> Model:
         obj = Manager(self.model).create(**kwargs)

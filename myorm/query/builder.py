@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from .safe_builder import get_safe_builder
-from .. import settings
+from ..settings import settings
 
 logger = logging.getLogger(__name__)
 

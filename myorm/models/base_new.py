@@ -115,7 +115,7 @@ class Model(metaclass=ModelMeta):
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
         # Import safe builder
         from ..query.safe_builder import get_safe_builder
-        from .. import settings
+        from ..settings import settings
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
@@ -160,7 +160,7 @@ class Model(metaclass=ModelMeta):
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
         from ..query.safe_builder import get_safe_builder
-        from .. import settings
+        from ..settings import settings
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
@@ -198,7 +198,7 @@ class Model(metaclass=ModelMeta):
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
 
         from ..query.safe_builder import get_safe_builder
-        from .. import settings
+        from ..settings import settings
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)

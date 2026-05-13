@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import os
 import uuid
 from decimal import Decimal
 from typing import Any
@@ -151,15 +152,18 @@ def sqlite_config():
 @pytest.fixture(scope="module")
 def postgres_config():
     """Configure for local PostgreSQL test database."""
+    if not os.getenv("MIKI_ORM_TEST_POSTGRES"):
+        pytest.skip("Postgres integration tests are disabled. Set MIKI_ORM_TEST_POSTGRES=1 to enable.")
+
     configure(
         databases={
             "default": {
                 "ENGINE": "postgresql",
-                "NAME": "miki_orm_test",
-                "USER": "postgres",
-                "PASSWORD": "admin",
-                "HOST": "localhost",
-                "PORT": 5432,
+                "NAME": os.getenv("MIKI_ORM_TEST_POSTGRES_DB", "miki_orm_test"),
+                "USER": os.getenv("MIKI_ORM_TEST_POSTGRES_USER", "postgres"),
+                "PASSWORD": os.getenv("MIKI_ORM_TEST_POSTGRES_PASSWORD", "admin"),
+                "HOST": os.getenv("MIKI_ORM_TEST_POSTGRES_HOST", "localhost"),
+                "PORT": int(os.getenv("MIKI_ORM_TEST_POSTGRES_PORT", 5432)),
             }
         }
     )

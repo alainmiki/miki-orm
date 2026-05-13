@@ -112,7 +112,6 @@ class ModelMeta(type):
                     # Determine target model class
                     target = field.to
                     if isinstance(target, str):
-                        from .registry import ModelRegistry
                         target_cls = ModelRegistry.get_model(target)
                         if target_cls is None:
                             # Target not yet registered; skip for now; will be wired later
@@ -163,7 +162,7 @@ class Model(metaclass=ModelMeta):
     def _build_insert(self) -> tuple[str, list[Any]]:
         from .fields import AutoField, DateTimeField
         from ..query.safe_builder import get_safe_builder
-        from .. import settings
+        from ..settings import settings
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
         db_config = settings.databases.get("default")
@@ -198,7 +197,7 @@ class Model(metaclass=ModelMeta):
     def _build_update(self) -> tuple[str, list[Any]]:
         from .fields import DateTimeField
         from ..query.safe_builder import get_safe_builder
-        from .. import settings
+        from ..settings import settings
 
         pk_name, pk_field = self._get_pk_field()
         pk_value = pk_field.db_value(getattr(self, pk_name, None))
@@ -254,7 +253,7 @@ class Model(metaclass=ModelMeta):
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
 
         from ..query.safe_builder import get_safe_builder
-        from .. import settings
+        from ..settings import settings
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
@@ -279,7 +278,7 @@ class Model(metaclass=ModelMeta):
         )
         from ..models.relationships import ForeignKey, ManyToManyField
         from ..query.safe_builder import get_safe_builder
-        from .. import settings
+        from ..settings import settings
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
         db_config = settings.databases.get("default")
@@ -513,7 +512,7 @@ class Model(metaclass=ModelMeta):
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
 
         from ..query.safe_builder import get_safe_builder
-        from .. import settings
+        from ..settings import settings
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
@@ -539,7 +538,7 @@ class Model(metaclass=ModelMeta):
         )
         from ..models.relationships import ForeignKey, ManyToManyField
         from ..query.safe_builder import get_safe_builder
-        from .. import settings
+        from ..settings import settings
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
         db_config = settings.databases.get("default")

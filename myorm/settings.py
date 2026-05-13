@@ -33,8 +33,13 @@ class ConnectionManager:
                 raise ValueError(f"No database configuration for alias '{db_alias}'")
             adapter = db_config.get_sync_adapter()
             config = db_config.get_connection_config()
-            self._connections[db_alias] = adapter.connect(config)
-        return self._connections[db_alias]
+            pool_config = db_config.get_pool_config()
+            self._connections[db_alias] = adapter.create_pool(config, pool_config)
+
+        pool_or_conn = self._connections[db_alias]
+        if hasattr(pool_or_conn, "acquire"):
+            return pool_or_conn.acquire()
+        return pool_or_conn
 
     def close_all(self) -> None:
         """Close all managed connections."""
@@ -42,6 +47,19 @@ class ConnectionManager:
             if hasattr(conn, "close"):
                 conn.close()
         self._connections.clear()
+
+    def validate_connection(self, db_alias: str = "default") -> bool:
+        conn = self.get_connection(db_alias)
+        try:
+            if hasattr(conn, "fetchone"):
+                row = conn.fetchone("SELECT 1", ())
+                return bool(row)
+            return True
+        except Exception:
+            return False
+        finally:
+            if hasattr(conn, "close"):
+                conn.close()
 
 
 class AsyncConnectionManager:
@@ -58,8 +76,13 @@ class AsyncConnectionManager:
                 raise ValueError(f"No database configuration for alias '{db_alias}'")
             adapter = db_config.get_async_adapter()
             config = db_config.get_connection_config()
-            self._connections[db_alias] = await adapter.connect(config)
-        return self._connections[db_alias]
+            pool_config = db_config.get_pool_config()
+            self._connections[db_alias] = await adapter.create_pool(config, pool_config)
+
+        pool_or_conn = self._connections[db_alias]
+        if hasattr(pool_or_conn, "acquire"):
+            return await pool_or_conn.acquire()
+        return pool_or_conn
 
     async def close_all(self) -> None:
         """Close all managed async connections."""
@@ -67,6 +90,19 @@ class AsyncConnectionManager:
             if hasattr(conn, "close"):
                 await conn.close()
         self._connections.clear()
+
+    async def validate_connection(self, db_alias: str = "default") -> bool:
+        conn = await self.get_connection(db_alias)
+        try:
+            if hasattr(conn, "fetchone"):
+                row = await conn.fetchone("SELECT 1", ())
+                return bool(row)
+            return True
+        except Exception:
+            return False
+        finally:
+            if hasattr(conn, "close"):
+                await conn.close()
 
 
 # Global managers
@@ -133,7 +169,17 @@ class DatabaseConfig:
         if self.secrets:
             for key, secret_key in self.secrets.items():
                 config[key] = os.getenv(secret_key, config.get(key))
+        if self.ssl:
+            config["SSL"] = self.ssl
         return config
+
+    def get_pool_config(self) -> Dict[str, Any]:
+        """Build pool configuration from the database config."""
+        return {
+            "min_size": int(self.pool.get("min_size", 1)),
+            "max_size": int(self.pool.get("max_size", 5)),
+            "timeout": int(self.pool.get("timeout", 30)),
+        }
 
 
 class Settings:
