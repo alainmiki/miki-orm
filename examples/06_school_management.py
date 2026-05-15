@@ -17,11 +17,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import myorm
-from myorm import models
-from myorm.migrations.engine import MigrationEngine
-from myorm.settings import settings as myorm_settings
-from myorm.connections.sqlite import SQLiteAdapter
+import mikiorm
+from mikiorm import models
+from mikiorm.migrations.engine import MigrationEngine
+from mikiorm.settings import settings as myorm_settings
+from mikiorm.connections.sqlite import SQLiteAdapter
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "school.db")
 MIGRATIONS_DIR = os.path.join(os.path.dirname(__file__), "school_migrations")
@@ -36,7 +36,7 @@ def cleanup():
 
 
 def configure():
-    myorm.configure({
+    mikiorm.configure({
         "default": {
             "ENGINE": "sqlite",
             "NAME": DB_PATH,

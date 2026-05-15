@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import mikiorm; print\\(mikiorm\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import mikiorm; print\\('OK', mikiorm\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"from mikiorm.models import Model; print\\('OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"from mikiorm.managers import Manager, QuerySet; print\\('OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(cd \"F:/workstation/python/miki-orm\" && rm -rf mikiorm/connections && ls mikiorm/)"
+    ]
+  }
+}

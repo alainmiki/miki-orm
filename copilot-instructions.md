@@ -1,61 +1,59 @@
-# miki-orm Copilot Instructions
+# mikiorm Copilot Instructions
 
 ## Project summary
-`miki-orm` is a universal Django-style ORM library for Python. It must support sync and async database access, provide a familiar Django-like API, and work across SQLite, PostgreSQL, and MySQL in the MVP.
+`mikiorm` is a universal Django-style ORM for Python. The library should feel familiar to Django users while remaining framework-agnostic, and support both sync and async workflows across SQLite, PostgreSQL, and MySQL in the MVP.
 
 ## What this project must prioritize
-- Django-style model fields and manager/queryset methods.
-- `makemigrations` to generate migration definitions and `migrate` to apply them, matching Django semantics.
-- Unified database configuration and settings that feel like Django `settings.py`.
-- Production-grade security and scalability features.
-- Clean, documented code with strong API documentation and developer guidance.
-- `uv` for dependency management and task execution, with `uv.lock` committed.
+- A clean top-level package shape with imports like `from mikiorm.models import Model`, `from mikiorm.managers import BaseManager`, and `from mikiorm.backends import Postgres`.
+- A CLI management experience that supports `mikiorm makemigrations`, `mikiorm migrate`, `mikiorm check`, `mikiorm dbcheck`, `mikiorm history`, and `mikiorm rollback`.
+- Django-style model fields, managers, querysets, and migration semantics.
+- Secure, production-ready query execution with parameterized SQL only.
+- Clear, documented code and API surface with user-friendly docs and examples.
+- `uv` for dependency management and task automation, with `uv.lock` committed.
 
-## Key architecture expectations
-- Modular packages for `connections`, `dialects`, `models`, `fields`, `managers`, `query`, `queryset`, `migrations`, `unit_of_work`, `cache`, `async_support`, `security`, and `observability`.
-- A dialect layer supporting SQLite, PostgreSQL, and MySQL by default.
-- A migration engine that can diff model definitions and database schema, generate migration files, and apply/rollback safely.
-- A configuration API for setting database engine, credentials, connection pooling, TLS, and secrets lookup.
-- Strong support for parameterized queries and schema-safe operations.
+## Architecture expectations
+- Modular packages for `conf`, `cli`, `backends`, `migrations`, `models`, `managers`, `transactions`, `utils`, `cache`, `observability`, and `exceptions`.
+- A backend structure that separates `base`, `sqlite`, `postgresql`, `mysql`, `oracle`, and `dummy` implementation details.
+- A migration engine capable of diffing model definitions vs. database schema, generating migration files, and applying/rolling back with safety.
+- A configuration layer for engine, credentials, pooling, TLS, and secret resolution.
+- Sync and async adapters with a shared model metadata layer.
 
-## API and developer experience
-- Model definitions should feel familiar to Django users.
-- Manager methods should include the full Django-like set: `all`, `filter`, `exclude`, `get`, `count`, `exists`, `first`, `last`, `update_or_create`, `bulk_create`, `update`, `values`, `values_list`, `select_related`, `prefetch_related`.
-- QuerySets should be lazy and support both sync `.all(connection)` and async `await .all(connection)`.
-- Field classes should include Django-style names and conversions: `AutoField`, `IntegerField`, `BigIntegerField`, `CharField`, `TextField`, `BooleanField`, `DateTimeField`, `DateField`, `TimeField`, `DecimalField`, `JSONField`, `UUIDField`, `ForeignKey`, `OneToOneField`, `ManyToManyField`, `BinaryField`, `EmailField`, `URLField`, etc.
+## API expectations
+- Model definitions should feel natural and support field access as attributes on instances.
+- Manager methods should include `all()`, `filter()`, `exclude()`, `get()`, `count()`, `exists()`, `first()`, `last()`, `update_or_create()`, `bulk_create()`, `update()`, `values()`, `values_list()`, `select_related()`,`delete()`,'`aggregate()`, `annotate()`,`get_or_create()`,`get_object_or_404`,`sum`, and `prefetch_related()`.
+- QuerySets should be lazy and support both synchronous execution and async execution with `await`.
+- Core fields should include `AutoField`, `IntegerField`, `BigIntegerField`, `CharField`, `TextField`, `BooleanField`, `DateTimeField`, `DateField`, `TimeField`, `DecimalField`, `JSONField`, `UUIDField`, `ForeignKey`, `OneToOneField`, `ManyToManyField`, `BinaryField`, `EmailField`, and `URLField`.
 
-## Configuration and settings
-- Provide a universal settings module or config object with keys like `DATABASES`, `DEFAULT_DATABASE`, `INSTALLED_APPS`, `MIGRATION_PATH`, and `LOGGING`.
-- Support dictionary-based database configuration similar to Django:
-  - `ENGINE` (`sqlite`, `postgresql`, `mysql`)
-  - `NAME`, `USER`, `PASSWORD`, `HOST`, `PORT`
-  - `OPTIONS`, `SSL`, `POOL`, `SECRETS`
-- Allow environment-driven overrides and secure secret retrieval.
+## Configuration requirements
+- Provide a unified settings module with `DATABASES`, `DEFAULT_DATABASE`, `INSTALLED_APPS`, `MIGRATION_PATH`, `LOGGING`, and environment overrides.
+- Support Django-style database dictionaries with `ENGINE`, `NAME`, `USER`, `PASSWORD`, `HOST`, `PORT`, `OPTIONS`, `SSL`, `POOL`, and `SECRETS`.
+- Allow secure secret retrieval and environment-driven config.
 
-## Security and production readiness
-- Use only parameterized queries; never build SQL via string interpolation.
-- Support TLS-enabled connections and secret manager integration.
-- Include audit logging for migrations and schema changes.
-- Design connection pooling, retries, timeouts, and validation around production workloads.
-- Make scalability and safety the default.
+## Security requirements
+- Parameterized SQL must be enforced everywhere.
+- Avoid raw string query composition.
+- Support TLS/SSL configuration and secret manager integration.
+- Add audit logging for migration execution and schema changes.
+- Build connection pooling, retries, and validation with production defaults.
 
 ## Documentation expectations
-- Every module, class, and public function should include clear docstrings.
-- The README and docs must explain setup, configuration, model definition, migrations, and CLI usage.
-- Code should be easy to navigate and maintain.
+- Public modules, classes, and functions should include descriptive docstrings.
+- The README and docs should cover package setup, configuration, model definition, migrations, CLI usage, and examples.
+- Examples must demonstrate real-world patterns like CRUD, relations, select-related/prefetch-related, and migrations.
 
-## CI and repository conventions
-- Use GitHub Actions for CI, with matrix coverage for Python versions and database scenarios.
-- Keep branch naming and PR conventions structured: `feature/`, `bugfix/`, `chore/`.
-- Ensure `uv` commands are available for linting, testing, and docs.
+## CI and conventions
+- Use GitHub Actions to run linting, formatting, and tests across Python versions.
+- Maintain branch naming and PR conventions: `feature/`, `bugfix/`, `chore/`.
+- Ensure `uv run` commands are available for linting, testing, and docs generation.
 
-## When working on this repository
-- Respect the Django-inspired design while keeping the ORM framework-agnostic.
-- Make sure any feature supports the MVP target databases before claiming readiness.
-- Prefer explicit, safe behaviors over convenience hacks.
-- Document new APIs and configuration options as part of the change.
+## Implementation guidance
+- Use the desired package structure from `structure.md` as the basis for refactoring.
+- Keep backend implementations isolated and engine-specific behavior in dedicated submodules.
+- Treat migrations as first-class functionality: generation, apply, history, and rollback.
+- Prefer explicit, safe behavior over convenience shortcuts.
 
 ## What to avoid
-- Don’t implement database support only for one backend if the feature cannot work for SQLite, Postgres, and MySQL.
-- Don’t bypass parameter binding or build SQL with raw string composition.
-- Don’t assume the project is Django-specific; it must remain generic and adaptable.
+- Do not build features only for a single backend unless they can be extended to SQLite, Postgres, and MySQL.
+- Do not bypass parameter binding or compose SQL by concatenating user input.
+- Do not assume the package is tied to Django; keep the API framework-agnostic.
+- Do not use terminal file operations for restructuring; prefer Python-based refactoring when moving files.

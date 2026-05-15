@@ -3,261 +3,221 @@
 ## Architecture Overview
 
 ### Core design principles
-- Modular architecture separated by concern: connections, dialects, models, fields, queries, transactions, migrations, caching, and observability.
-- Framework-agnostic API surface so calls are independent of Flask/FastAPI/Django or desktop/mobile frameworks.
-- Clear sync/async split through parallel interfaces: sync connection/pool and async connection/pool.
-- Pluggable dialect abstraction for database-specific SQL generation and field translation.
-- Use of `uv` for package management and developer automation.
+- Modular architecture separated by concern: configuration, CLI, backends, migrations, models, fields, queries, transactions, and observability.
+- Framework-agnostic API that is independent of Flask/FastAPI/Django or desktop/mobile frameworks.
+- Clear sync/async split with parallel interfaces and shared model/field metadata.
+- Pluggable dialect layer for safe SQL generation across database engines.
+- Top-level CLI and package entrypoints for developer ergonomics.
 
 ## Package Layout
 
-Proposed package layout:
-
-- `miki_orm/`
+- `mikiorm/`
   - `__init__.py`
-  - `connections.py`
-  - `dialects.py`
-  - `models.py`
-  - `fields.py`
-  - `managers.py`
-  - `query.py`
-  - `queryset.py`
-  - `unit_of_work.py`
-  - `migrations.py`
-  - `cache.py`
-  - `async_support.py`
-  - `security.py`
-  - `observability.py`
-  - `registry.py`
+  - `conf/`
+    - `__init__.py`
+    - `settings.py`
+    - `defaults.py`
+    - `loader.py`
+  - `cli/`
+    - `__init__.py`
+    - `commands.py`
+    - `manage.py`
+    - `migration_commands.py`
+    - `health_commands.py`
+  - `backends/`
+    - `__init__.py`
+    - `base/`
+      - `__init__.py`
+      - `base.py`
+      - `adapter.py`
+      - `pool.py`
+      - `dialect.py`
+    - `sqlite/`
+      - `__init__.py`
+      - `client.py`
+      - `schema.py`
+      - `creation.py`
+      - `operations.py`
+      - `introspection.py`
+      - `features.py`
+    - `postgresql/`
+      - `__init__.py`
+      - `client.py`
+      - `compiler.py`
+      - `schema.py`
+      - `introspection.py`
+      - `features.py`
+    - `mysql/`
+      - `__init__.py`
+      - `client.py`
+      - `compiler.py`
+      - `schema.py`
+      - `introspection.py`
+      - `features.py`
+    - `oracle/`
+      - `__init__.py`
+      - `client.py`
+      - `schema.py`
+      - `compat.py`
+    - `dummy/`
+      - `__init__.py`
+      - `client.py`
+      - `memory.py`
+  - `migrations/`
+    - `__init__.py`
+    - `operations/`
+      - `__init__.py`
+      - `create_table.py`
+      - `alter_table.py`
+      - `drop_table.py`
+      - `add_column.py`
+      - `alter_column.py`
+      - `drop_column.py`
+      - `create_index.py`
+      - `drop_index.py`
+      - `constraints.py`
+    - `engine.py`
+    - `history.py`
+    - `schema.py`
+    - `editor.py`
+    - `manager.py`
+  - `models/`
+    - `__init__.py`
+    - `base.py`
+    - `fields/`
+      - `__init__.py`
+      - `core.py`
+      - `relational.py`
+      - `validators.py`
+    - `functions/`
+    - `sql/`
+    - `query.py`
+    - `options.py`
+    - `aggregates.py`
+    - `constants.py`
+    - `constraints.py`
+  - `managers/`
+    - `__init__.py`
+    - `base.py`
+    - `custom.py`
+  - `transactions.py`
+  - `utils.py`
   - `exceptions.py`
+  - `registry.py`
+  - `observability.py`
+  - `cache.py`
 
 - `tests/`
-  - `test_fields.py`
-  - `test_query.py`
-  - `test_models.py`
-  - `test_migrations.py`
-  - `test_async.py`
-  - `test_integration.py`
-
-- `docs/` (PRD, TRD, quickstart, runbook)
-- `.github/workflows/ci.yml`
+  - `unit/`
+  - `integration/`
+- `examples/`
+- `docs/`
 - `docker-compose.yml`
+- `.github/workflows/ci.yml`
 
 ## Component Design
 
-### Connections
+### Configuration
+- `mikiorm.conf.settings`
+  - Provides `DATABASES`, `DEFAULT_DATABASE`, `INSTALLED_APPS`, `MIGRATION_PATH`, `LOGGING`, and environment overrides.
+  - Supports secure secret resolution and connection option injection.
+  - Loads settings from Python modules and environment variables.
 
-`connections.py`
-- `ConnectionManager`
-  - `register_adapter(name: str, adapter: Type[BaseAdapter])`
-  - `get_connection(name: str) -> BaseConnection`
-  - `close_all()`
+### CLI
+- `mikiorm.cli.commands`
+  - `makemigrations`
+  - `migrate`
+  - `check`
+  - `dbcheck`
+  - `history`
+  - `rollback`
+- `mikiorm.cli.manage`
+  - Exposes top-level command entrypoints like `mikiorm` and optionally `miki`.
+  - Includes command validation and safe execution.
 
-- `BaseAdapter`
-  - `connect(self, dsn: str, **options) -> BaseConnection`
-  - `pool(self, **options) -> BasePool`
+### Backends
+- Base backend abstractions in `mikiorm.backends.base`.
+- Engine-specific backend packages under `sqlite`, `postgresql`, `mysql`, `oracle`, and `dummy`.
+- Each backend includes client driver integration, schema introspection, creation, and engine-specific features.
+- Backends expose consistent sync and async APIs.
 
-- `SQLiteSyncAdapter`, `PostgresSyncAdapter`, `MySQLSyncAdapter`
-- `SQLiteAsyncAdapter`, `PostgresAsyncAdapter`
+### Models and fields
+- `mikiorm.models.base.Model` is the core ORM model class.
+- `mikiorm.models.fields` contains field definitions and conversions.
+- Fields support database-aware type mapping and both Python-to-DB and DB-to-Python conversions.
+- Model metadata supports relationship resolution and migration generation.
 
-- `ConnectionPool`
-  - `acquire(timeout: float = 30.0) -> Connection`
-  - `release(connection: Connection) -> None`
-  - `validate(connection) -> bool`
-  - `close()`
+### Managers and querysets
+- `BaseManager` exposes Django-like operations on models.
+- `QuerySet` is lazy, composable, and can execute synchronously or asynchronously.
+- Relationship helpers `select_related` and `prefetch_related` are supported at the query builder level.
 
-### Dialects
+### Query builder and compiler
+- AST representation of filters, joins, ordering, and annotations.
+- Dialect compilation produces safe parameterized SQL strings.
+- Cached SQL generation uses query fingerprints and an LRU cache.
 
-`dialects.py`
-- `BaseDialect`
-  - `paramstyle: str`
-  - `placeholder(index: int) -> str`
-  - `quote_identifier(name: str) -> str`
-  - `type_map: dict[str, str]`
-  - `adapt_value(value) -> Any`
+### Migrations
+- Migration engine compares model metadata to the live database schema.
+- Migration files are versioned with metadata, timestamp, and checksum.
+- Apply and rollback flows are transactional by default, with backup strategies for SQLite.
+- Migration history is stored in a dedicated schema table.
 
-- `PostgresDialect(BaseDialect)`
-  - placeholders `$1`, `$2`, ...
-  - `JSONB`, `UUID`, `TIMESTAMPTZ`
+### Transactions and unit of work
+- Transaction helpers in `mikiorm.transactions` provide context-managed atomic blocks.
+- Unit of work tracks new, dirty, and deleted entities.
+- Optimistic locking and retry semantics are supported for safe concurrent updates.
 
-- `SQLiteDialect(BaseDialect)`
-  - `?` placeholders
-  - fallback mapping for `JSONField`, `UUIDField`
+### Observability and security
+- Structured logging for query execution and migration actions.
+- Metrics for latency, pool usage, and cache hit rate.
+- Parameterized SQL only; no raw string interpolation for queries.
+- Secret manager integration for production credentials.
 
-- `MySQLDialect(BaseDialect)`
-  - `%s` placeholders
-  - MySQL-specific quoting and type mapping
+## Execution flows
 
-### Models and Fields
+### Model lifecycle
+1. Define model classes under `mikiorm.models`.
+2. Register models using the global registry.
+3. Generate migrations based on model diffs.
+4. Apply migrations to the target database.
+5. Query and mutate data through manager/queryset APIs.
 
-`models.py`
-- `ModelMeta(type)`
-  - `__new__()` registers model classes
-  - `resolve_foreign_keys()`
-  - `fields` collection and primary key resolution
+### Query execution
+1. Build a queryset using manager methods.
+2. Compile the AST to SQL via the selected dialect.
+3. Execute parameterized SQL through the backend connection.
+4. Hydrate rows into model instances.
 
-- `Model`
-  - `save(self, connection: Connection | AsyncConnection) -> None`
-  - `delete(self, connection: Connection | AsyncConnection) -> None`
-  - `to_dict(self) -> dict[str, Any]`
-  - `refresh_from_db(self, connection: Connection | AsyncConnection) -> None`
+### Migration flow
+1. Load current model metadata and database schema.
+2. Diff schema and generate migration operations.
+3. Write migration artifacts and metadata.
+4. Apply changes inside a transaction or backup workflow.
+5. Record history and release migration locks.
 
-`fields.py`
-- `Field`
-  - `name: str`
-  - `nullable: bool`
-  - `default: Any`
-  - `python_value(self, raw: Any) -> Any`
-  - `db_value(self, python_value: Any) -> Any`
+### Async flow
+1. Acquire an async connection from the backend pool.
+2. Execute queries via `AsyncQuerySet`.
+3. Await hydration into model objects.
+4. Release the connection back to the pool.
 
-- Concrete field classes
-  - `IntegerField`, `CharField`, `BooleanField`
-  - `DateTimeField`, `DateField`, `TimeField`
-  - `DecimalField`, `JSONField`, `UUIDField`
-  - `ForeignKey(to: str | Type[Model])`
+## Non-functional requirements
+- Secure defaults for production workloads.
+- Clear error reporting and migration rollbacks.
+- Maintainable module boundaries and concise public APIs.
+- Strong documentation and example coverage.
 
-### Managers and QuerySets
+## Technology assumptions
+- Use `uv` for dependency management and developer tasks.
+- Prefer built-in drivers and widely used async adapters.
+- Keep the package compatible with Python 3.14+.
 
-`managers.py`
-- `Manager`
-  - `all(self) -> QuerySet`
-  - `filter(self, *expressions) -> QuerySet`
-  - `exclude(self, *expressions) -> QuerySet`
-  - `get(self, *expressions) -> Model`
-  - `count(self) -> int`
-  - `exists(self) -> bool`
-  - `first(self) -> Model | None`
-  - `last(self) -> Model | None`
-  - `update_or_create(self, defaults: dict, **kwargs)`
-  - `bulk_create(self, objs: list[Model], batch_size: int = 1000)`
-  - `update(self, **values) -> int`
-  - `values(self, *fields) -> list[dict[str, Any]]`
-  - `values_list(self, *fields) -> list[tuple[Any, ...]]`
-  - `select_related(self, *fields) -> QuerySet`
-  - `prefetch_related(self, *fields) -> QuerySet`
+## Structure validation
+- Imports should follow the top-level package shape: `from mikiorm.models import Model`, `from mikiorm.managers import BaseManager`, `from mikiorm.backends import Postgres`.
+- The CLI should be discoverable from package entrypoints.
+- Migrations should be safe, reversible, and audit-ready.
 
-`queryset.py`
-- `QuerySet`
-  - `filter(*expressions) -> QuerySet`
-  - `exclude(*expressions) -> QuerySet`
-  - `order_by(*fields) -> QuerySet`
-  - `annotate(**annotations) -> QuerySet`
-  - `select_related(*related) -> QuerySet`
-  - `prefetch_related(*related) -> QuerySet`
-  - `all(self, connection: Connection) -> list[Model]`
-  - `first(self, connection: Connection) -> Model | None`
-  - `count(self, connection: Connection) -> int`
-  - `exists(self, connection: Connection) -> bool`
-  - `__iter__()` / `__await__()` for async execution
-
-## Query Builder
-
-`query.py`
-- AST node classes
-  - `Eq(field, value)`, `IContains(field, value)`, `In(field, values)`, `Range(field, start, end)`, `Not(expr)`, `And(*exprs)`, `Or(*exprs)`, `OrderBy(field, direction)`
-  - `Join(left, right, on)`
-
-- `QueryAST`
-  - `to_dict(self) -> dict`
-  - `compile(self, dialect: BaseDialect) -> tuple[str, list[Any]]`
-  - `compile_cached(self, dialect: BaseDialect) -> tuple[str, list[Any]]`
-
-- LRU cache
-  - `compile_cached(ast, dialect)` uses fingerprint key from `to_dict()`
-  - cache TTL and maxsize configurable in `cache.py`
-
-## Caching
-
-`cache.py`
-- `LRUCache`
-  - `get(key: str) -> Any`
-  - `set(key: str, value: Any, ttl: timedelta | None = None)`
-  - `invalidate(key: str)`
-  - `clear()`
-- Schema-aware invalidation on migration events.
-
-## Unit of Work
-
-`unit_of_work.py`
-- `UnitOfWork`
-  - `register_new(obj: Model)`
-  - `register_dirty(obj: Model)`
-  - `register_deleted(obj: Model)`
-  - `commit(connection: Connection) -> None`
-  - `rollback() -> None`
-
-- Optimistic locking
-  - `version` column support
-  - `check_version(obj) -> bool`
-  - `retry_on_conflict(func)` hook
-
-## Migrations
-
-`migrations.py`
-- Schema diff engine
-  - `compare_models_and_schema(models, schema) -> list[MigrationOperation]`
-
-- Migration operations
-  - `CreateTable`, `AlterTable`, `DropTable`, `AddColumn`, `AlterColumn`, `DropColumn`, `CreateIndex`, `DropIndex`, `CreateConstraint`, `DropConstraint`
-
-- Migration files
-  - JSON or structured YAML-like format with operations, metadata, timestamp, checksum.
-
-- Application flow
-  - `migrate.up(connection)`
-  - `migrate.down(connection, steps=1)`
-  - `migrate.status(connection)`
-
-- SQLite strategy
-  - Recreate table with backup preserving indexes and constraints when ALTER is unsupported.
-  - Wrap operations in a transaction and use temporary backup tables.
-
-- Postgres strategy
-  - Use native `ALTER TABLE` when possible.
-  - Fallback to recreate table with data copy and constraint preservation.
-  - Advisory locks or lock table to serialize migration runs.
-
-- Safety
-  - Backup DDL/data before applying risky changes.
-  - Rollback last migration using reverse operations.
-  - Audit log migration metadata and change history.
-
-## Async Support
-
-`async_support.py`
-- `AsyncConnectionPool`
-  - `acquire(timeout: float = 30.0) -> AsyncConnection`
-  - `release(connection: AsyncConnection) -> None`
-  - `validate(connection) -> bool`
-  - `close()`
-  - `max_lifetime: float`
-  - `min_size`, `max_size`, `acquire_timeout`
-
-- `AsyncQuerySet`
-  - `all(self, connection: AsyncConnection) -> Coroutine[list[Model], None, None]`
-  - `first(self, connection: AsyncConnection) -> Coroutine[Model | None, None, None]`
-
-- `AsyncAdapter`
-  - `connect_async(self, dsn: str, **options) -> AsyncConnection`
-  - `pool_async(self, **options) -> AsyncConnectionPool`
-
-- Integration with `asyncpg` and `aiosqlite`.
-
-## Security
-
-`security.py`
-- Parameterized SQL only.
-- TLS support in adapter configuration.
-- Secrets manager adapter interface:
-  - `SecretProvider.get_secret(key: str) -> str`
-  - `ConnectionConfig.from_secret(name: str)`
-- Audit logging for migration and schema changes.
-- Least privilege guidance for production DB users.
-
-## Observability
-
-`observability.py`
-- Metrics collectors
   - `QueriesPerSecond`, `LatencyHistogram`, `PoolUsageGauge`, `CacheHitRate`
 - Logging
   - Structured logs with JSON-friendly fields.

@@ -4,12 +4,12 @@
 import os
 import sys
 
-# Add parent to path so we can import myorm
+# Add parent to path so we can import mikiorm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import myorm
-from myorm import models
-from myorm.settings import connection_manager
+import mikiorm
+from mikiorm import makemigrations, migrate, models
+from mikiorm.settings import connection_manager
 from datetime import datetime, date, time, timedelta
 from decimal import Decimal
 import uuid as _uuid
@@ -22,7 +22,7 @@ def cleanup():
 
 
 def configure():
-    myorm.configure({
+    mikiorm.configure({
         "default": {
             "ENGINE": "sqlite",
             "NAME": "test_all_fields.db",
@@ -264,7 +264,7 @@ def test_binary_field():
 def test_email_url_slug_fields():
     """Test EmailField, URLField, SlugField defaults."""
 
-    from myorm.models.fields import EmailField, URLField, SlugField
+    from mikiorm.models.fields import EmailField, URLField, SlugField
 
     ef = EmailField()
     assert ef.max_length == 254, f"EmailField max_length should be 254, got {ef.max_length}"
@@ -280,7 +280,7 @@ def test_email_url_slug_fields():
 def test_charfield_no_default_max_length():
     """Test that CharField has no default max_length (unlike old 255)."""
 
-    from myorm.models.fields import CharField
+    from mikiorm.models.fields import CharField
 
     cf = CharField()
     assert cf.max_length is None, f"CharField max_length should be None, got {cf.max_length}"
@@ -290,7 +290,7 @@ def test_charfield_no_default_max_length():
 def test_textfield_no_max_length():
     """Test that TextField doesn't inherit max_length from CharField."""
 
-    from myorm.models.fields import TextField
+    from mikiorm.models.fields import TextField
 
     tf = TextField()
     assert not hasattr(tf, "max_length") or tf.max_length is None
@@ -301,7 +301,7 @@ def test_textfield_no_max_length():
 def test_boolean_null_always_false():
     """Test that BooleanField.null is always False."""
 
-    from myorm.models.fields import BooleanField
+    from mikiorm.models.fields import BooleanField
 
     bf = BooleanField(null=True)
     assert bf.null is False, "BooleanField.null should always be False"
@@ -311,7 +311,7 @@ def test_boolean_null_always_false():
 def test_choices():
     """Test choices with dict format."""
 
-    from myorm.models.fields import CharField
+    from mikiorm.models.fields import CharField
 
     f = CharField(choices={"A": "Alpha", "B": "Beta"})
     result = f.get_choices()
@@ -407,7 +407,7 @@ def test_decimal_validation():
     import pytest
 
     try:
-        from myorm.models.fields import DecimalField
+        from mikiorm.models.fields import DecimalField
 
         # Should raise when decimal_places > max_digits
         try:
@@ -432,7 +432,7 @@ def test_decimal_validation():
 
 def test_on_delete_handlers():
     """Test on_delete handler functions."""
-    from myorm.models.relationships import CASCADE, SET_NULL, SET_DEFAULT, PROTECT, DO_NOTHING, SET
+    from mikiorm.models.relationships import CASCADE, SET_NULL, SET_DEFAULT, PROTECT, DO_NOTHING, SET
 
     assert callable(CASCADE)
     assert callable(SET_NULL)
@@ -445,7 +445,7 @@ def test_on_delete_handlers():
 
 def test_autoincrement():
     """Test auto_increment field attribute."""
-    from myorm.models.fields import IntegerField
+    from mikiorm.models.fields import IntegerField
 
     f = IntegerField(primary_key=True, auto_increment=True)
     assert f.auto_increment is True
@@ -456,8 +456,7 @@ def test_autoincrement():
 
 def run_all():
     """Run all tests."""
-    cleanup()
-    configure()
+    
 
     print("Running comprehensive field tests...")
     test_integer_fields()
@@ -489,4 +488,7 @@ def run_all():
 
 
 if __name__ == "__main__":
+    # Initialize configuration first to avoid "Database not configured" errors
+    cleanup()
+    configure()
     run_all()

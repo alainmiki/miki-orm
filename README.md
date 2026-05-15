@@ -4,7 +4,8 @@ Universal Django-style ORM for Python applications.
 
 ## Repository layout
 
-- `myorm/` — ORM package with Django-style models, fields, managers, migrations, and adapters.
+- `myorm/` — Legacy implementation package with Django-style models, fields, managers, migrations, and adapters.
+- `mikiorm/` — Alias package exposing the stable public API for the ORM.
 - `tests/` — Unit and integration test stubs.
 - `docs/` — Product and technical documentation.
 - `.github/workflows/ci.yml` — GitHub Actions CI.
@@ -55,9 +56,9 @@ uv run migrate
 1. Configure your database:
 
 ```python
-import myorm
+import mikiorm
 
-myorm.configure({
+mikiorm.configure({
     "default": {
         "ENGINE": "sqlite",
         "NAME": "mydb.db",
@@ -68,7 +69,7 @@ myorm.configure({
 2. Define models just like Django:
 
 ```python
-from myorm import models
+from mikiorm import models
 
 class User(models.Model):
     name = models.CharField(max_length=100)
@@ -81,9 +82,9 @@ class User(models.Model):
 3. Register your model and run migrations:
 
 ```python
-myorm.register_model(User)
-myorm.makemigrations([User])
-myorm.migrate()
+mikiorm.register_model(User)
+mikiorm.makemigrations([User])
+mikiorm.migrate()
 ```
 
 ### App registration
@@ -91,9 +92,9 @@ myorm.migrate()
 If your application package contains a `models.py`, register the app instead of models one-by-one:
 
 ```python
-myorm.install_app("my_app")
-myorm.makemigrations()
-myorm.migrate()
+mikiorm.install_app("my_app")
+mikiorm.makemigrations()
+mikiorm.migrate()
 ```
 
 4. Use the Django-style manager API:

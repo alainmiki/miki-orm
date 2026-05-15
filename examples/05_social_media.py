@@ -16,12 +16,13 @@ Demonstrates:
 """
 
 import os
+import argparse
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import myorm
-from myorm import models
+import mikiorm
+from mikiorm import models
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "social.db")
 
@@ -31,13 +32,25 @@ def cleanup():
         os.remove(DB_PATH)
 
 
-def configure():
-    myorm.configure({
-        "default": {
-            "ENGINE": "sqlite",
-            "NAME": DB_PATH,
-        }
-    })
+def configure(backend="sqlite"):
+    if backend == "postgres":
+        mikiorm.configure({
+            "default": {
+                "ENGINE": "postgresql",
+                "NAME": "test",
+                "USER": "postgres",
+                "PASSWORD": "admin",
+                "HOST": "localhost",
+                "PORT": 5432,
+            }
+        })
+    else:
+        mikiorm.configure({
+            "default": {
+                "ENGINE": "sqlite",
+                "NAME": DB_PATH,
+            }
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -132,9 +145,15 @@ class Message(models.Model):
 # Demo
 # ---------------------------------------------------------------------------
 
-def run():
-    cleanup()
-    configure()
+def run(backend="sqlite"):
+    if backend == "sqlite":
+        cleanup()
+    
+    configure(backend)
+
+    # Initialize schema
+    mikiorm.makemigrations([User, Follow, Post, Comment, Like, Message])
+    mikiorm.migrate()
 
     # ---- Create users ----
     users_data = [
@@ -341,4 +360,8 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--backend", choices=["sqlite", "postgres"], default="sqlite")
+    args = parser.parse_args()
+    
+    run(args.backend)

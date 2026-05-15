@@ -19,8 +19,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import myorm
-from myorm import models
+import mikiorm
+from mikiorm import models
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "ecommerce.db")
 
@@ -31,7 +31,7 @@ def cleanup():
 
 
 def configure():
-    myorm.configure({
+    mikiorm.configure({
         "default": {
             "ENGINE": "sqlite",
             "NAME": DB_PATH,

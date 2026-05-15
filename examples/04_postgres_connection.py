@@ -18,34 +18,42 @@ Usage:
 """
 
 import os
+import argparse
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import myorm
-from myorm import models
-from myorm.settings import settings, connection_manager
-from myorm.migrations.engine import MigrationEngine
-from myorm.connections import PostgresAdapter
+import mikiorm
+from mikiorm import models
+from mikiorm.settings import settings, connection_manager
+from mikiorm.migrations.engine import MigrationEngine
+from mikiorm.connections import PostgresAdapter
 
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-def configure_postgres():
-    """Configure the default database to use PostgreSQL."""
-    myorm.configure({
-        "default": {
-            "ENGINE": "postgresql",
-            "NAME": "test",
-            "USER": "postgres",
-            "PASSWORD": "admin",
-            "HOST": "localhost",
-            "PORT": 5432,
-            "OPTIONS": {"sslmode": "prefer"},
-        }
-    })
+def configure(backend="postgres"):
+    if backend == "postgres":
+        mikiorm.configure({
+            "default": {
+                "ENGINE": "postgresql",
+                "NAME": "test",
+                "USER": "postgres",
+                "PASSWORD": "admin",
+                "HOST": "localhost",
+                "PORT": 5432,
+                "OPTIONS": {"sslmode": "prefer"},
+            }
+        })
+    else:
+        mikiorm.configure({
+            "default": {
+                "ENGINE": "sqlite",
+                "NAME": "postgres_demo.db",
+            }
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -82,44 +90,37 @@ class Review(models.Model):
 # Demo
 # ---------------------------------------------------------------------------
 
-def test_connection():
+def test_connection(backend):
     """Verify we can open and use a PostgreSQL connection."""
-    print("\n--- Testing PostgreSQL Connection ---")
+    print(f"\n--- Testing {backend} Connection ---")
 
-    adapter = PostgresAdapter()
     try:
-        config = settings.get_database("default")
-        conn = adapter.connect(config.get_connection_config())
-        print("  [OK] Connected to PostgreSQL database '%s'" % config.name)
+        conn = connection_manager.get_connection("default")
+        print("  [OK] Connected to database")
 
         conn.execute("SELECT 1 as result")
         row = conn.fetchone("SELECT 1 as result", ())
         assert row == (1,), "Expected (1,), got %s" % (row,)
         print("  [OK] Basic query executed successfully")
 
-        conn.commit()
+        if hasattr(conn, "release"):
+            conn.close()
         return conn
     except Exception as e:
         print("  [FAIL] Connection failed: %s" % e)
-        print("\nHint: Make sure PostgreSQL is running on localhost:5432")
-        print("   with database 'test', user 'postgres', password 'admin'")
+        if backend == "postgres":
+            print("\nHint: Make sure PostgreSQL is running on localhost:5432")
+            print("   with database 'test', user 'postgres', password 'admin'")
         return None
 
 
-def run_crud():
-    """Run a full round of CRUD operations on PostgreSQL."""
-    print("\n--- Running CRUD Operations ---")
+def run_crud(backend):
+    """Run a full round of CRUD operations."""
+    print(f"\n--- Running CRUD Operations on {backend} ---")
 
-    engine = MigrationEngine()
-    ops = engine.makemigrations([Product, Review])
-    print("  Generated %d migration operation(s)" % len(ops))
-
-    # engine.migrate_direct(ops, connection=conn)
-    engine.migrate()
+    mikiorm.makemigrations([Product, Review])
+    mikiorm.migrate()
     print("  [OK] Tables created via migrate()")
-
-    # Product._table_created = False
-    # Review._table_created = False
 
     # ---- CREATE ----
     print("\n  -- CREATE --")
@@ -229,15 +230,19 @@ def cleanup(conn):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    configure_postgres()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--backend", choices=["sqlite", "postgres"], default="postgres")
+    args = parser.parse_args()
 
-    conn = test_connection()
+    configure(args.backend)
+
+    conn = test_connection(args.backend)
     if conn is None:
-        print("\n[WARN] Could not connect to PostgreSQL. Exiting.")
+        print(f"\n[WARN] Could not connect to {args.backend}. Exiting.")
         sys.exit(1)
 
     try:
-        run_crud()
+        run_crud(args.backend)
     finally:
         # cleanup(conn)
         pass

@@ -20,9 +20,9 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import myorm
-from myorm import models
-from myorm.managers.base import Manager
+import mikiorm
+from mikiorm import models
+from mikiorm.managers.base import Manager
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tasks.db")
 
@@ -33,7 +33,7 @@ def cleanup():
 
 
 def configure():
-    myorm.configure({
+    mikiorm.configure({
         "default": {
             "ENGINE": "sqlite",
             "NAME": DB_PATH,
