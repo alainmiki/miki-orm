@@ -19,8 +19,11 @@ from .pool import (
     PooledConnection,
     SyncConnectionPool,
 )
+from .schema_editor import SchemaEditor, field_to_sql_type
 
 __all__ = [
+    "SchemaEditor",
+    "field_to_sql_type",
     # adapter / connection
     "BaseAdapter",
     "BaseAsyncAdapter",
