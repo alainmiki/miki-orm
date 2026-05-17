@@ -1,103 +1,141 @@
-"""SQLite database introspection utilities."""
+"""SQLite database introspection."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-from mikiorm.query.safe_builder import SafeBuilder
+from mikiorm.backends.base.introspection import BaseIntrospection
 
 
-class DatabaseIntrospection:
-    """Encapsulates introspection methods for SQLite."""
+class SQLiteIntrospection(BaseIntrospection):
+    """Introspects SQLite database tables and columns."""
 
-    def __init__(self, connection: Any) -> None:
-        self.connection = connection
-        self.builder = SafeBuilder()
-
-    def get_table_list(self, cursor: Any = None) -> List[Dict[str, Any]]:
-        """Return a list of table names in the database."""
-        cursor = cursor or self.connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    def get_tables(self) -> list[str]:
+        """Returns a list of table names in the database."""
+        cursor = self.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
         )
-        rows = cursor.fetchall()
-        return [{"name": row[0]} for row in rows]
+        return [row[0] for row in cursor.fetchall()]
 
-    def get_table_description(self, table_name: str) -> List[Dict[str, Any]]:
-        """Return a description of the table columns."""
-        cursor = self.connection.execute(f"PRAGMA table_info({table_name})")
-        rows = cursor.fetchall()
-        
-        return [
-            {
-                "name": row[1],
-                "type": row[2],
-                "nullable": not bool(row[3]),
-                "default": row[4],
-                "primary_key": bool(row[5]),
-            }
-            for row in rows
-        ]
+    def get_columns(self, table_name: str) -> list[dict[str, Any]]:
+        """
+        Returns a list of column dictionaries for the given table.
+        Each dictionary contains:
+            - name (str)
+            - type (str)
+            - null (bool)
+            - primary_key (bool)
+            - default (Any)
+            - unique (bool)
+        """
+        cursor = self.connection.execute(f"PRAGMA table_info({table_name});")
+        columns_info = cursor.fetchall()
 
-    def get_relations(self, cursor: Any = None) -> List[Dict[str, Any]]:
-        """Return a list of foreign key relations."""
-        # SQLite doesn't have a simple way to get all relations
-        # We need to query each table's foreign keys
-        tables = self.get_table_list()
-        relations = []
-        
-        for table in tables:
-            table_name = table["name"]
-            cursor = self.connection.execute(f"PRAGMA foreign_key_list({table_name})")
-            fk_rows = cursor.fetchall()
-            
-            for fk_row in fk_rows:
-                relations.append({
-                    "table_name": table_name,
-                    "column": fk_row[3],
-                    "foreign_table": fk_row[2],
-                    "foreign_column": fk_row[4],
-                })
-        
-        return relations
+        columns = []
+        for col_info in columns_info:
+            # cid, name, type, notnull, dflt_value, pk
+            col_name = col_info[1]
+            col_type = col_info[2]
+            not_null = bool(col_info[3])
+            default_value = col_info[4]
+            is_pk = bool(col_info[5])
 
-    def get_key_columns(self, cursor: Any = None) -> List[Dict[str, Any]]:
-        """Return a list of columns that are foreign keys."""
-        return self.get_relations(cursor)
+            # Check for unique constraint (SQLite doesn't have a direct PRAGMA for this per column)
+            # This is a simplification; a full implementation would parse CREATE TABLE SQL.
+            is_unique = False
+            if not is_pk:  # PK implies unique
+                try:
+                    unique_check_cursor = self.connection.execute(
+                        f"PRAGMA index_list({table_name});"
+                    )
+                    indexes = unique_check_cursor.fetchall()
+                    for index in indexes:
+                        index_name = index[1]
+                        is_unique_index = bool(index[2])
+                        if is_unique_index:
+                            index_info_cursor = self.connection.execute(
+                                f"PRAGMA index_info({index_name});"
+                            )
+                            index_cols = index_info_cursor.fetchall()
+                            if len(index_cols) == 1 and index_cols[0][2] == col_name:
+                                is_unique = True
+                                break
+                except Exception:
+                    # Fallback if index introspection fails
+                    pass
 
-    def get_indexes(self, table_name: str) -> List[Dict[str, Any]]:
-        """Return a list of indexes for the table."""
-        cursor = self.connection.execute(f"PRAGMA index_list({table_name})")
-        rows = cursor.fetchall()
-        
+            columns.append(
+                {
+                    "name": col_name,
+                    "type": col_type,
+                    "null": not not_null,
+                    "primary_key": is_pk,
+                    "default": default_value,
+                    "unique": is_unique,
+                }
+            )
+        return columns
+
+    def get_primary_key_column(self, table_name: str) -> str | None:
+        columns = self.get_columns(table_name)
+        for col in columns:
+            if col["primary_key"]:
+                return col["name"]
+        return None
+
+    def get_indexes(self, table_name: str) -> list[dict[str, Any]]:
+        """
+        Returns a list of index dictionaries for the given table.
+        Each dictionary contains:
+            - name (str)
+            - columns (list[str])
+            - unique (bool)
+        """
+        cursor = self.connection.execute(f"PRAGMA index_list({table_name});")
+        indexes_info = cursor.fetchall()
+
         indexes = []
-        for row in rows:
-            index_name = row[1]
-            cursor2 = self.connection.execute(f"PRAGMA index_info({index_name})")
-            index_info = cursor2.fetchall()
-            
+        for idx_info in indexes_info:
+            # seq, name, unique, origin, partial
+            idx_name = idx_info[1]
+            is_unique = bool(idx_info[2])
+            origin = idx_info[3]
+
+            # Skip primary key indexes if they were already handled by column PK
+            if origin == 'pk':
+                continue
+
+            info_cursor = self.connection.execute(f"PRAGMA index_info({idx_name});")
+            cols_info = info_cursor.fetchall()
+            # seqno, cid, name
+            columns = [c[2] for c in cols_info if c[2]]
+
             indexes.append({
-                "name": index_name,
-                "columns": [info[2] for info in index_info],
-                "unique": bool(row[2]),
+                "name": idx_name,
+                "columns": columns,
+                "unique": is_unique
             })
-        
         return indexes
 
-    def get_schema_list(self, cursor: Any = None) -> List[Dict[str, Any]]:
-        """Return schema list (SQLite uses 'main' as default schema)."""
-        return [{"name": "main"}]
+    def get_foreign_keys(self, table_name: str) -> list[dict[str, Any]]:
+        """
+        Returns a list of foreign key dictionaries for the given table.
+        Each dictionary contains:
+            - column (str): The column in the current table.
+            - referred_table (str): The table being referenced.
+            - referred_column (str): The column in the referenced table.
+        """
+        cursor = self.connection.execute(f"PRAGMA foreign_key_list({table_name});")
+        fks_info = cursor.fetchall()
 
-    def table_exists(self, table_name: str, cursor: Any = None) -> bool:
-        """Check if a table exists."""
-        cursor = cursor or self.connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)
-        )
-        return cursor.fetchone() is not None
-
-    def column_exists(self, table_name: str, column_name: str) -> bool:
-        """Check if a column exists in a table."""
-        cursor = self.connection.execute(f"PRAGMA table_info({table_name})")
-        for row in cursor.fetchall():
-            if row[1] == column_name:
-                return True
-        return False
+        fks = []
+        for fk_info in fks_info:
+            # id, seq, table, from, to, on_update, on_delete, match
+            fks.append(
+                {
+                    "column": fk_info[3],
+                    "referred_table": fk_info[2],
+                    "referred_column": fk_info[4],
+                }
+            )
+        return fks

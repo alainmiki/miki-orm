@@ -102,6 +102,7 @@ class RenameField(MigrationOperation):
         super().__init__()
         self.operation_type = "rename_field"
         self.payload = payload
+        self.reverse_op = RenameField(model_name=model_name, old_name=new_name, new_name=old_name)
 
 
 class CreateIndex(MigrationOperation):

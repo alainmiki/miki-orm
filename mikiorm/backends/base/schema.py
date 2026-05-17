@@ -1,0 +1,65 @@
+--- a/f:/workstation/python/miki-orm/mikiorm/backends/base/schema.py
++++ /dev/null
+@@ -1,56 +0,0 @@
+-"""Base classes for database schema editing."""
+-
+-from __future__ import annotations
+-
+-from abc import ABC, abstractmethod
+-from typing import TYPE_CHECKING, Type
+-
+-from mikiorm.models.fields.base import CASCADE, DO_NOTHING, PROTECT, RESTRICT, SET_NULL
+-
+-if TYPE_CHECKING:
+-    from mikiorm.backends.base.adapter import BaseConnection
+-    from mikiorm.models.base import Model
+-    from mikiorm.models.fields.base import Field
+-
+-
+-class BaseSchemaEditor(ABC):
+-    """Base class for database schema editing operations."""
+-
+-    def __init__(self, connection: BaseConnection):
+-        self.connection = connection
+-
+-    @abstractmethod
+-    def create_model(self, model: Type[Model]) -> None:
+-        """Creates a table for the given model."""
+-        raise NotImplementedError
+-
+-    @abstractmethod
+-    def add_field(self, model: Type[Model], field: Field) -> None:
+-        """Adds a column to an existing table."""
+-        raise NotImplementedError
+-
+-    @abstractmethod
+-    def remove_field(self, model: Type[Model], field: Field) -> None:
+-        """Removes a column from an existing table."""
+-        raise NotImplementedError
+-
+-    def sql_on_delete(self, on_delete_action: str) -> str:
+-        """Returns the SQL for an ON DELETE clause."""
+-        if on_delete_action == CASCADE:
+-            return "ON DELETE CASCADE"
+-        elif on_delete_action == PROTECT:
+-            return "ON DELETE PROTECT"
+-        elif on_delete_action == SET_NULL:
+-            return "ON DELETE SET NULL"
+-        elif on_delete_action == RESTRICT:
+-            return "ON DELETE RESTRICT"
+-        elif on_delete_action == DO_NOTHING:
+-            return "ON DELETE NO ACTION"  # SQL standard for DO_NOTHING
+-        return ""
+-
+-    # Other common schema operations (alter_field, rename_field, etc.) would go here
+-    # and be implemented by specific backend schema editors.
+-    # For MVP, we focus on create_model and add_field,alter_field, rename_field,remove_field etc.
+-
+-    def __enter__(self):
+-        return self
+-
+-    def __exit__(self, exc_type, exc_val, exc_tb):
+-        pass  # No special cleanup for schema editor context
+
+
+

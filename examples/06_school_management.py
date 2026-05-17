@@ -20,8 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import mikiorm
 from mikiorm import models
 from mikiorm.migrations.engine import MigrationEngine
-from mikiorm.settings import settings as myorm_settings
-from mikiorm.connections.sqlite import SQLiteAdapter
+from mikiorm.settings import settings as mikiorm_settings
+from mikiorm.backends.sqlite import SQLiteAdapter
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "school.db")
 MIGRATIONS_DIR = os.path.join(os.path.dirname(__file__), "school_migrations")
@@ -148,7 +148,7 @@ def run():
     print("=" * 60)
 
     # Create tables directly (simulating makemigrations + migrate)
-    db_config = myorm_settings.get_database("default")
+    db_config = mikiorm_settings.get_database("default")
     adapter = SQLiteAdapter()
     conn = adapter.connect(db_config.get_connection_config())
 

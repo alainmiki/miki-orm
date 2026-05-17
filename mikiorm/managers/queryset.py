@@ -7,9 +7,9 @@ from typing import Any, Iterable
 
 from mikiorm.managers.base import Manager
 
-from ..settings import settings
-from ..connections.base import get_param_placeholder
+from ..conf.settings import settings, connection_manager
 from ..models.base import Model, ObjectDoesNotExist, MultipleObjectsReturned
+from ..models.relationships import ForeignKey
 from ..query.builder import QueryBuilder
 from ..query.safe_builder import get_safe_builder
 
@@ -28,9 +28,32 @@ class QuerySet:
         self._prefetch_related: list[str] = []
 
     def _get_connection(self) -> Any:
-        from ..settings import connection_manager
+        from ..conf.settings import connection_manager
 
         return connection_manager.get_connection()
+
+    def _get_table_name(self) -> str:
+        return self.model._meta.table_name or self.model.__name__.lower() + "s"
+
+    def _resolve_lookup(self, field_name: str, value: Any) -> tuple[str, Any]:
+        if field_name == "pk":
+            field_name = next(
+                (
+                    name
+                    for name, fld in self.model._meta.fields.items()
+                    if fld.primary_key
+                ),
+                "id",
+            )
+
+        field_obj = self.model._meta.fields.get(field_name)
+        if isinstance(field_obj, ForeignKey):
+            if isinstance(value, (list, tuple, set)):
+                value = [getattr(v, "pk", v) for v in value]
+            elif hasattr(value, "pk"):
+                value = value.pk
+
+        return field_name, value
 
     def filter(self, *args: Any, **kwargs: Any) -> "QuerySet":
         self._filters.append(("AND", kwargs))
@@ -67,6 +90,7 @@ class QuerySet:
         for _, kwargs in self._filters:
             for key, value in kwargs.items():
                 field_name, operator = builder.parse_lookup(key)
+                field_name, value = self._resolve_lookup(field_name, value)
                 condition, cond_params = builder.build_condition(
                     field_name, operator, value
                 )
@@ -77,6 +101,7 @@ class QuerySet:
         for _, kwargs in self._excludes:
             for key, value in kwargs.items():
                 field_name, operator = builder.parse_lookup(key)
+                field_name, value = self._resolve_lookup(field_name, value)
                 condition, cond_params = builder.build_condition(
                     field_name, operator, value
                 )
@@ -123,11 +148,11 @@ class QuerySet:
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
-        
-        table = self.model._meta.table_name or self.model.__name__.lower()
+
+        table = self._get_table_name()
         quoted_table = builder.quote_table(table)
         where, params = self._build_where_clause()
-        
+
         sql = f"SELECT COUNT(*) FROM {quoted_table}{where}"
         row = conn.fetchone(sql, params)
         return row[0] if row else 0
@@ -205,7 +230,6 @@ class QuerySet:
             )
             raise
 
-
     def create(self, connection: Any = None, **kwargs: Any) -> Model:
         obj = Manager(self.model).create(**kwargs)
         return obj
@@ -216,14 +240,14 @@ class QuerySet:
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
-        
-        table = self.model._meta.table_name or self.model.__name__.lower()
+
+        table = self._get_table_name()
         quoted_table = builder.quote_table(table)
         where, params = self._build_where_clause()
-        
+
         sql = f"DELETE FROM {quoted_table}{where}"
         logger.debug(f"Executing DELETE: {sql} with params: {params}")
-        
+
         cursor = conn.execute(sql, params)
         conn.commit()
         rowcount = cursor.rowcount if hasattr(cursor, "rowcount") else 0
@@ -234,16 +258,16 @@ class QuerySet:
         """Update all models matching this QuerySet with safe identifier quoting."""
         if not values:
             return 0
-        
+
         conn = connection or self._get_connection()
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
-        
-        table = self.model._meta.table_name or self.model.__name__.lower()
+
+        table = self._get_table_name()
         quoted_table = builder.quote_table(table)
         where, where_params = self._build_where_clause()
-        
+
         # Build SET clause with safe identifier quoting
         set_parts = []
         set_params = []
@@ -252,13 +276,13 @@ class QuerySet:
             ph = builder.param_placeholder
             set_parts.append(f"{quoted_col} = {ph}")
             set_params.append(val)
-        
+
         # Combine SET params with WHERE params
         all_params = set_params + where_params
-        
+
         sql = f"UPDATE {quoted_table} SET {', '.join(set_parts)}{where}"
         logger.debug(f"Executing UPDATE: {sql} with params: {all_params}")
-        
+
         cursor = conn.execute(sql, all_params)
         conn.commit()
         rowcount = cursor.rowcount if hasattr(cursor, "rowcount") else 0
@@ -270,20 +294,20 @@ class QuerySet:
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
-        
-        table = self.model._meta.table_name or self.model.__name__.lower()
+
+        table = self._get_table_name()
         quoted_table = builder.quote_table(table)
-        
+
         if fields:
             quoted_cols = [builder.quote_column(f) for f in fields]
             cols = ", ".join(quoted_cols)
         else:
             cols = "*"
-        
+
         where, params = self._build_where_clause()
         sql = f"SELECT {cols} FROM {quoted_table}{where}"
         rows = conn.fetchall(sql, params)
-        
+
         result: list[dict[str, Any]] = []
         for row in rows:
             if isinstance(row, dict):
@@ -292,31 +316,41 @@ class QuerySet:
                 result.append(dict(zip(fields, row)))
         return result
 
-    def values_list(self, *fields: str) -> list[tuple[Any, ...]]:
+    def values_list(
+        self, *fields: str, flat: bool = False
+    ) -> list[tuple[Any, ...] | Any]:
         conn = self._get_connection()
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
-        
-        table = self.model._meta.table_name or self.model.__name__.lower()
+
+        table = self._get_table_name()
         quoted_table = builder.quote_table(table)
-        
+
         if fields:
             quoted_cols = [builder.quote_column(f) for f in fields]
             cols = ", ".join(quoted_cols)
         else:
             cols = "*"
-        
+
         where, params = self._build_where_clause()
         sql = f"SELECT {cols} FROM {quoted_table}{where}"
         rows = conn.fetchall(sql, params)
-        
+
         result: list[tuple[Any, ...]] = []
         for row in rows:
-            if isinstance(row, dict):
-                result.append(tuple(row.get(f) for f in fields))
+            if flat:
+                if len(fields) != 1:
+                    raise ValueError("flat=True requires exactly one field")
+                if isinstance(row, dict):
+                    result.append(row.get(fields[0]))
+                else:
+                    result.append(row[0])
             else:
-                result.append(tuple(row))
+                if isinstance(row, dict):
+                    result.append(tuple(row.get(f) for f in fields))
+                else:
+                    result.append(tuple(row))
         return result
 
     def __iter__(self) -> Iterable[Model]:

@@ -11,6 +11,7 @@ from ..models.fields import (
     AutoField, BigAutoField, SmallAutoField,
     IntegerField, BigIntegerField, SmallIntegerField,
     PositiveIntegerField, PositiveSmallIntegerField,
+    Field, # Import Field for type checking
     CharField, TextField, BooleanField,
     DecimalField, FloatField, DurationField,
     DateTimeField, DateField, TimeField,
@@ -21,7 +22,7 @@ from ..models.fields import (
 from ..models.relationships import (
     ForeignKey, OneToOneField, ManyToManyField,
 )
-from ..query.safe_builder import get_safe_builder
+from ..backends.base.schema_editor import field_to_sql_type # Import canonical helper
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class SchemaDiffGenerator:
     def __init__(self, connection: Any, engine: str) -> None:
         self.connection = connection
         self.engine = engine
+        self.app_labels: list[str] | None = None  # Added to store app_labels
         self.introspector = get_introspector(connection, engine)
         self.builder = get_safe_builder(engine)
 
@@ -68,9 +70,9 @@ class SchemaDiffGenerator:
         """Convert a Field instance to a column definition dict."""
         is_pk = field.primary_key
         sql_type = self._sql_type_for_field(field, include_auto=is_pk)
-        
+
         col_def = {
-            "name": field.name,
+            "name": field.column, # Use field.column for DB column name
             "type": sql_type,
             "null": field.null,
             "default": field.default if not is_pk else None,
@@ -80,82 +82,71 @@ class SchemaDiffGenerator:
         }
         return col_def
 
-    def _sql_type_for_field(self, field: Any, include_auto: bool = False) -> str:
-        """Get SQL type string for a field."""
-        if isinstance(field, (IntegerField, AutoField, SmallAutoField,
-                              PositiveIntegerField, PositiveSmallIntegerField)):
-            return "INTEGER"
-        if isinstance(field, BigIntegerField):
-            return "BIGINT"
-        if isinstance(field, BigAutoField):
-            return "BIGINT"
-        if isinstance(field, CharField):
-            ml = field.max_length or 255
-            return f"VARCHAR({ml})"
-        if isinstance(field, TextField):
-            return "TEXT"
-        if isinstance(field, BooleanField):
-            return "BOOLEAN"
-        if isinstance(field, DecimalField):
-            return f"DECIMAL({field.max_digits}, {field.decimal_places})"
-        if isinstance(field, FloatField):
-            return "FLOAT"
-        if isinstance(field, DurationField):
-            return "BIGINT"
-        if isinstance(field, DateTimeField):
-            return "DATETIME"
-        if isinstance(field, DateField):
-            return "DATE"
-        if isinstance(field, TimeField):
-            return "TIME"
-        if isinstance(field, UUIDField):
-            return "VARCHAR(36)"
-        if isinstance(field, JSONField):
-            return "TEXT"
-        if isinstance(field, BinaryField):
-            return "BLOB"
-        if isinstance(field, EmailField):
-            ml = field.max_length or 254
-            return f"VARCHAR({ml})"
-        if isinstance(field, URLField):
-            ml = field.max_length or 200
-            return f"VARCHAR({ml})"
-        if isinstance(field, SlugField):
-            ml = field.max_length or 50
-            return f"VARCHAR({ml})"
-        if isinstance(field, GenericIPAddressField):
-            return "VARCHAR(45)"
-        if isinstance(field, FilePathField):
-            return "VARCHAR(255)"
-        if isinstance(field, (ForeignKey, OneToOneField)):
-            # FK type inferred from referenced field; for now use INTEGER
-            return "INTEGER"
-        if isinstance(field, ManyToManyField):
-            # M2M doesn't create a column; handled separately
-            return None
-        return "TEXT"
+    def _sql_type_for_field(self, field: Any) -> str:
+        """Get SQL type string for a field using the canonical helper."""
+        # The builder's dialect is available via self.builder.dialect
+        return field_to_sql_type(field, self.builder.dialect)
+
+    def _find_renamed_field(self, removed_db_col: Dict[str, Any], added_model_fields: Dict[str, Dict[str, Any]]) -> Optional[str]:
+        """
+        Attempts to find a matching added model field that could be a rename of the removed DB column.
+        This is a heuristic and can be improved.
+        """
+        removed_col_name = removed_db_col["name"]
+        removed_col_type = self._normalize_type(removed_db_col["type"], removed_db_col["primary_key"])
+        removed_col_null = removed_db_col["null"]
+        removed_col_pk = removed_db_col["primary_key"]
+
+        for added_field_name, added_field_def in added_model_fields.items():
+            added_col_type = self._normalize_type(added_field_def["type"], added_field_def["primary_key"])
+            added_col_null = added_field_def["null"]
+            added_col_pk = added_field_def["primary_key"]
+
+            # Simple heuristic: types must be compatible, nullability must match, PK status must match.
+            # More advanced: check for similar names, or allow type changes if compatible.
+            if (removed_col_type == added_col_type and
+                removed_col_null == added_col_null and
+                removed_col_pk == added_col_pk):
+                # This is a strong candidate for a rename.
+                # We could add a name similarity check here, but for now, this is a basic match.
+                return added_field_name
+        return None
 
     def generate_diff(self) -> List[Any]:
-        """Compare registered models to DB schema and return list of operations."""
+        """Compare registered models to DB schema and return list of operations.
+
+        Args:
+            app_labels: Optional list of model names to filter by.
+        """
         from .operations import (
-            CreateTable, AddField, AlterField, DropField,
-            CreateIndex, DropIndex, RenameField, DeleteModel
+            CreateTable,
+            AddField,
+            AlterField,
+            DropField,
+            CreateIndex,
+            DropIndex,
+            DeleteModel,
+            RenameField, # Import RenameField
         )
-        
+
         ops = []
         db_schema = self._get_db_schema()
         model_classes = ModelRegistry.all_models()
-        
+
+        # Filter models if app_labels (interpreted as model names) are provided
+        if self.app_labels:
+            model_classes = [m for m in model_classes if m.__name__ in self.app_labels]
+
         # Track processed tables
         processed_tables = set()
-        
+
         for model_cls in model_classes:
             meta = self._get_model_meta(model_cls)
             table_name = meta["table_name"]
             processed_tables.add(table_name)
-            
+
             model_fields = meta["fields"]
-            
+
             if table_name not in db_schema:
                 # Table doesn't exist - create it
                 columns_data = []
@@ -169,45 +160,64 @@ class SchemaDiffGenerator:
                         })
                 ops.append(CreateTable(name=table_name, columns=columns_data))
                 continue
-            
+
             # Table exists - compute column differences
             db_columns = db_schema[table_name]["columns"]
-            db_col_names = set(db_columns.keys())
-            model_col_names = set(model_fields.keys())
             
+            # Identify removed and added fields
+            removed_db_cols = {name: col_def for name, col_def in db_columns.items() if name not in model_fields}
+            added_model_fields = {name: field_def for name, field_def in model_fields.items() if name not in db_columns}
+
+            # Attempt to detect renames
+            renamed_pairs: List[Tuple[str, str]] = [] # (old_name, new_name)
+            matched_added_fields = set()
+
+            for removed_col_name, removed_col_def in removed_db_cols.items():
+                matched_new_field_name = self._find_renamed_field(removed_col_def, added_model_fields)
+                if matched_new_field_name and matched_new_field_name not in matched_added_fields:
+                    renamed_pairs.append((removed_col_name, matched_new_field_name))
+                    matched_added_fields.add(matched_new_field_name)
+                    logger.info(f"Detected potential rename: {table_name}.{removed_col_name} -> {table_name}.{matched_new_field_name}")
+            
+            # Process renames first
+            for old_name, new_name in renamed_pairs:
+                ops.append(RenameField(model_name=table_name, old_name=old_name, new_name=new_name))
+                # Remove these from further processing as they are handled
+                del removed_db_cols[old_name]
+                del added_model_fields[new_name]
+
+            # Now handle remaining AddField and DropField
             # New columns -> AddField
-            for col_name in model_col_names - db_col_names:
+            for col_name, field_def in added_model_fields.items(): # Iterate over remaining added fields
                 field = model_cls._meta.fields[col_name]
-                if field.__class__.__name__ in ("ManyToManyField",):
-                    # Handle M2M separately
+                if isinstance(field, ManyToManyField): # Use isinstance for proper type checking
                     continue
                 ops.append(AddField(model_name=table_name, field=field))
-            
-            # Removed columns -> DropField (careful: don't drop PKs)
-            for col_name in db_col_names - model_col_names:
-                # Verify it's not a managed FK constraint we should clean up
+
+            # Removed columns -> DropField
+            for col_name, col_def in removed_db_cols.items(): # Iterate over remaining removed columns
                 ops.append(DropField(model_name=table_name, field_name=col_name))
-            
-            # Changed columns -> AlterField
-            for col_name in (db_col_names & model_col_names):
+
+            # Changed columns -> AlterField (for fields common to both)
+            for col_name in (set(db_columns.keys()) & set(model_fields.keys())) - matched_added_fields: # Exclude renamed fields
                 db_col = db_columns[col_name]
                 model_field = model_cls._meta.fields[col_name]
                 model_def = self._field_to_column_def(model_field)
-                
+
                 if self._column_changed(db_col, model_def):
                     ops.append(AlterField(model_name=table_name, field=model_field))
-            
+
             # Index differences - simplified: check Meta.indexes
             model_indexes = getattr(model_cls._meta, "indexes", [])
             db_indexes = db_schema[table_name].get("indexes", [])
             # TODO: proper index diff
-            
+
         # Check for tables in DB not in models -> DeleteModel (with caution)
         db_tables = set(db_schema.keys())
         for table in db_tables - processed_tables:
             # Only if table wasn't manually created
             pass  # skip auto-deletion for safety
-            
+
         return ops
 
     def _column_changed(self, db_col: Dict[str, Any], model_def: Dict[str, Any]) -> bool:
@@ -220,10 +230,10 @@ class SchemaDiffGenerator:
             ("unique", db_col.get("unique", False)),
             ("primary_key", db_col.get("primary_key", False)),
         ]
-        
+
         model_type = model_def.get("type")
         is_pk = model_def.get("primary_key", False)
-        
+
         for attr, db_val in checks:
             model_val = model_def.get(attr)
             if attr == "type":
@@ -264,7 +274,10 @@ class SchemaDiffGenerator:
         return t
 
 
-def generate_migration_operations(connection: Any, engine: str) -> List[Any]:
+def generate_migration_operations(
+    connection: Any, engine: str, app_labels: list[str] | None = None
+) -> List[Any]:
     """Convenience function: return list of migration operations needed."""
     gen = SchemaDiffGenerator(connection, engine)
+    gen.app_labels = app_labels  # Pass app_labels to the generator
     return gen.generate_diff()

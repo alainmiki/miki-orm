@@ -87,35 +87,43 @@ class DatabaseIntrospection:
         """Return a list of columns that are foreign keys."""
         return self.get_relations(cursor)
 
-    def get_indexes(self, table_name: str) -> List[Dict[str, Any]]:
-        """Return a list of indexes for the table."""
+    def get_indexes(self, table_name: str) -> list[dict[str, Any]]:
+        """
+        Returns a list of index dictionaries for the given table.
+        Excludes primary key indexes.
+        """
         sql = """
-            SELECT 
-                indexname,
-                indexdef
-            FROM pg_indexes
-            WHERE tablename = %s
+            SELECT
+                i.relname AS index_name,
+                ix.indisunique AS is_unique,
+                a.attname AS column_name
+            FROM
+                pg_class t
+                JOIN pg_index ix ON t.oid = ix.indrelid
+                JOIN pg_class i ON i.oid = ix.indexrelid
+                JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+            WHERE
+                t.relname = %s
+                AND ix.indisprimary = FALSE
+                AND t.relkind = 'r'
+            ORDER BY
+                i.relname,
+                array_position(ix.indkey::int[], a.attnum::int)
         """
         rows = self.connection.fetchall(sql, (table_name,))
-        
-        return [
-            {
-                "name": row[0],
-                "definition": row[1],
-                "columns": self._extract_columns_from_index(row[1]),
-                "unique": "UNIQUE" in row[1].upper(),
-            }
-            for row in rows
-        ]
 
-    def _extract_columns_from_index(self, definition: str) -> List[str]:
-        """Extract column names from an index definition."""
-        import re
-        match = re.search(r'\((.+)\)', definition)
-        if match:
-            columns_str = match.group(1)
-            return [col.strip('"').strip() for col in columns_str.split(',')]
-        return []
+        indexes: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            name, is_unique, col_name = row
+            if name not in indexes:
+                indexes[name] = {
+                    "name": name,
+                    "columns": [],
+                    "unique": is_unique,
+                }
+            indexes[name]["columns"].append(col_name)
+
+        return list(indexes.values())
 
     def get_schema_list(self, cursor: Any = None) -> List[Dict[str, Any]]:
         """Return list of schemas."""

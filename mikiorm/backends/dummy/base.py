@@ -5,8 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Dict, Iterable, List, Tuple, Optional
 
-from ...connections.base import BaseAdapter, BaseConnection, SyncAdapter
-
+from ...backends.base import BaseAdapter, BaseConnection, SyncConnectionPool
 
 class DummyConnection(BaseConnection):
     """SQLite in-memory connection for dummy backend."""
@@ -48,7 +47,8 @@ class DummyAdapter(BaseAdapter):
         return DummyConnection(conn)
 
     def create_pool(self, config: Dict[str, Any], pool_config: Dict[str, Any] | None = None) -> SyncAdapter:
-        from ...connections.base import SyncConnectionPool
+        from ...backends.base import SyncConnectionPool
+
         pool_config = pool_config or {}
         return SyncConnectionPool(
             self,

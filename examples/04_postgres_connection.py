@@ -26,8 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import mikiorm
 from mikiorm import models
 from mikiorm.settings import settings, connection_manager
-from mikiorm.migrations.engine import MigrationEngine
-from mikiorm.connections import PostgresAdapter
+# from mikiorm.migrations.engine import MigrationEngine # No longer needed directly here
+from mikiorm.backends.postgresql import PostgresAdapter
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +35,10 @@ from mikiorm.connections import PostgresAdapter
 # ---------------------------------------------------------------------------
 
 def configure(backend="postgres"):
+    # Ensure the migrations directory exists for makemigrations
+    migrations_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mikiorm", "migrations")
+    os.makedirs(migrations_dir, exist_ok=True)
+
     if backend == "postgres":
         mikiorm.configure({
             "default": {
@@ -42,9 +46,7 @@ def configure(backend="postgres"):
                 "NAME": "test",
                 "USER": "postgres",
                 "PASSWORD": "admin",
-                "HOST": "localhost",
-                "PORT": 5432,
-                "OPTIONS": {"sslmode": "prefer"},
+                "HOST": "localhost", "PORT": 5432, "OPTIONS": {"sslmode": "prefer"},
             }
         })
     else:
@@ -118,8 +120,10 @@ def run_crud(backend):
     """Run a full round of CRUD operations."""
     print(f"\n--- Running CRUD Operations on {backend} ---")
 
-    mikiorm.makemigrations([Product, Review])
-    mikiorm.migrate()
+    # Use MigrationEngine directly as per updated cli/init
+    from mikiorm.migrations.engine import MigrationEngine
+    MigrationEngine().makemigrations([Product, Review])
+    MigrationEngine().migrate()
     print("  [OK] Tables created via migrate()")
 
     # ---- CREATE ----

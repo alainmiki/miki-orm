@@ -1,6 +1,6 @@
 """High-level database wrapper following Django's per-alias backend pattern.
 
-A :class:`BaseDatabaseWrapper` owns the connection/pool, schema editor, and
+A :class:`BaseDatabaseWrapper` owns the connection/pool, introspection, schema editor, and
 metadata for one configured database alias.  Backends extend it with their
 adapter and dialect.
 
@@ -28,6 +28,8 @@ from .pool import (
     PooledConnection,
     SyncConnectionPool,
 )
+from .introspection import BaseIntrospection
+from .schema import BaseSchemaEditor
 
 
 class DatabaseSettings:
@@ -76,6 +78,8 @@ class BaseDatabaseWrapper:
     display_name: str = "Unknown"
     adapter_cls: type[BaseAdapter] | None = None
     async_adapter_cls: type[BaseAsyncAdapter] | None = None
+    introspection_cls: type[BaseIntrospection] | None = None
+    schema_editor_cls: type[BaseSchemaEditor] | None = None
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
@@ -94,6 +98,12 @@ class BaseDatabaseWrapper:
 
     def get_dialect(self) -> Dialect:
         return get_dialect_from_engine(self.settings_dict.engine)
+
+    def get_introspection(self, connection: BaseConnection) -> BaseIntrospection:
+        return self.introspection_cls(connection) if self.introspection_cls else None
+
+    def get_schema_editor(self, connection: BaseConnection) -> BaseSchemaEditor:
+        return self.schema_editor_cls(connection) if self.schema_editor_cls else None
 
 
 __all__ = [

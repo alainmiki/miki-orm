@@ -133,7 +133,32 @@ class ModelMeta(type):
                     from .m2m import ReverseManyToManyDescriptor
                     setattr(target_cls, field.related_name, ReverseManyToManyDescriptor(field, cls))
 
-        return cls
+            # Install reverse FK/OneToOne descriptors for models referenced via ForeignKey/OneToOneField
+            from .relationships import (
+                ForeignKey,
+                OneToOneField,
+                ReverseForeignKeyDescriptor,
+                ReverseOneToOneDescriptor,
+            )
+
+            for fname, field in fields.items():
+                if (
+                    isinstance(field, (ForeignKey, OneToOneField))
+                    and field.related_name
+                ):
+                    target = field.to
+                    if isinstance(target, str):
+                        target_cls = ModelRegistry.get_model(target)
+                        if target_cls is None:
+                            continue
+                    else:
+                        target_cls = target
+                    descriptor = (
+                        ReverseOneToOneDescriptor(field, cls)
+                        if isinstance(field, OneToOneField)
+                        else ReverseForeignKeyDescriptor(field, cls)
+                    )
+                    setattr(target_cls, field.related_name, descriptor)
 
         return cls
 
@@ -162,11 +187,14 @@ class Model(metaclass=ModelMeta):
             value = kwargs.get(field_name, field_obj.default)
             if callable(value) and not isinstance(value, Field):
                 value = value()
-            setattr(self, field_name, field_obj.python_value(value))
+            value = field_obj.python_value(value)
+            value = field_obj.validate(value)
+            setattr(self, field_name, value)
         self._saved = False
 
     def _get_connection(self) -> Any:
-        from ..settings import connection_manager
+        from ..conf.settings import connection_manager
+
         return connection_manager.get_connection()
 
     def _get_pk_field(self) -> tuple[str, Field]:
@@ -178,7 +206,7 @@ class Model(metaclass=ModelMeta):
     def _build_insert(self) -> tuple[str, list[Any]]:
         from .fields import AutoField, DateTimeField
         from ..query.safe_builder import get_safe_builder
-        from ..settings import settings
+        from ..conf.settings import settings
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
         db_config = settings.databases.get("default")
@@ -199,9 +227,6 @@ class Model(metaclass=ModelMeta):
             elif isinstance(field_obj, DateTimeField) and field_obj.auto_now:
                 value = datetime.now(timezone.utc)
                 setattr(self, name, value)
-            elif isinstance(field_obj, DateTimeField) and field_obj.auto_now:
-                value = datetime.now()
-                setattr(self, name, value)
             db_value = field_obj.db_value(value)
             cols.append(builder.quote_column(name))
             vals.append(db_value)
@@ -216,7 +241,7 @@ class Model(metaclass=ModelMeta):
     def _build_update(self) -> tuple[str, list[Any]]:
         from .fields import DateTimeField
         from ..query.safe_builder import get_safe_builder
-        from ..settings import settings
+        from ..conf.settings import settings
 
         pk_name, pk_field = self._get_pk_field()
         pk_value = pk_field.db_value(getattr(self, pk_name, None))
@@ -281,7 +306,8 @@ class Model(metaclass=ModelMeta):
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
 
         from ..query.safe_builder import get_safe_builder
-        from ..settings import settings
+        from ..conf.settings import settings
+
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
@@ -306,7 +332,7 @@ class Model(metaclass=ModelMeta):
         )
         from ..models.relationships import ForeignKey, ManyToManyField
         from ..query.safe_builder import get_safe_builder
-        from ..settings import settings
+        from ..conf.settings import settings
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
         db_config = settings.databases.get("default")
@@ -428,6 +454,7 @@ class Model(metaclass=ModelMeta):
             return
 
         # Immediate execution
+        self.full_clean()
         self._ensure_table_exists(conn)
         try:
             if not self._saved or force_insert:
@@ -481,6 +508,7 @@ class Model(metaclass=ModelMeta):
             return
 
         # Immediate execution
+        self.full_clean()
         await self._async_ensure_table_exists(conn)
         try:
             if not self._saved or force_insert:
@@ -530,7 +558,11 @@ class Model(metaclass=ModelMeta):
         sql, params = self._build_update()
         logger.debug(f"Executing UPDATE: {sql} with params: {params}")
         params.append(self.version) # Add current version for optimistic locking
-        await connection.execute(sql, params)
+        cursor = await connection.execute(sql, params)
+        if cursor.rowcount == 0:
+            raise ConcurrencyError(
+                f"Optimistic lock failed for {self.__class__.__name__} pk={self.pk}. Record was modified concurrently."
+            )
         self._saved = True
         logger.debug(f"Updated {self.__class__.__name__} pk={self.pk}")
 
@@ -541,7 +573,8 @@ class Model(metaclass=ModelMeta):
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
 
         from ..query.safe_builder import get_safe_builder
-        from ..settings import settings
+        from ..conf.settings import settings
+
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
@@ -567,7 +600,7 @@ class Model(metaclass=ModelMeta):
         )
         from ..models.relationships import ForeignKey, ManyToManyField
         from ..query.safe_builder import get_safe_builder
-        from ..settings import settings
+        from ..conf.settings import settings
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
         db_config = settings.databases.get("default")
@@ -670,6 +703,33 @@ class Model(metaclass=ModelMeta):
 
     def to_dict(self) -> dict[str, Any]:
         return {name: getattr(self, name) for name in self._meta.fields}
+
+    def refresh_from_db(self, connection: Any = None) -> None:
+        """Reload this instance from the database."""
+        conn = connection or self._get_connection()
+        pk_name, pk_field = self._get_pk_field()
+        pk_value = getattr(self, pk_name)
+        if pk_value is None:
+            raise ValueError("Cannot refresh unsaved instance")
+        queryset = self.__class__.objects.filter(**{pk_name: pk_value})
+        try:
+            fresh = queryset.get()
+            for name in self._meta.fields:
+                setattr(self, name, getattr(fresh, name))
+        except ObjectDoesNotExist:
+            raise ObjectDoesNotExist(
+                f"{self.__class__.__name__} with {pk_name}={pk_value} does not exist"
+            )
+
+    def full_clean(self) -> None:
+        for name, field_obj in self._meta.fields.items():
+            if isinstance(field_obj, ManyToManyField):
+                continue
+            value = getattr(self, name, None)
+            if callable(value) and not isinstance(value, Field):
+                value = value()
+            valid_value = field_obj.validate(field_obj.python_value(value))
+            setattr(self, name, valid_value)
 
     @classmethod
     def objects(cls) -> Any:

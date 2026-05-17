@@ -5,8 +5,9 @@ from __future__ import annotations
 import pytest
 import sqlite3
 
-from mikiorm.connections import SQLiteAdapter, SQLiteConnection
-from mikiorm.connections.base import BaseAdapter, BaseConnection
+from mikiorm.backends.sqlite.adapter import Adapter as SQLiteAdapter
+from mikiorm.backends.sqlite.base import SQLiteConnection
+from mikiorm.backends.base import BaseAdapter, BaseConnection, PooledConnection, SyncConnectionPool
 
 
 class TestSQLiteAdapter:
@@ -55,21 +56,21 @@ class TestSQLiteAdapter:
         pool = adapter.create_pool({"NAME": ":memory:"})
         assert hasattr(pool, "acquire")
         conn = pool.acquire()
-        assert isinstance(conn, BaseConnection)
+        assert isinstance(conn, PooledConnection)
         conn.close()
 
 
 class TestPostgresAdapter:
     def test_module_imports(self):
         """psycopg2-based adapter should be importable."""
-        from mikiorm.connections import PostgresAdapter, PostgresConnection
+        from mikiorm.backends.postgresql.base import PostgresAdapter, PostgresConnection
         adapter = PostgresAdapter()
         assert isinstance(adapter, BaseAdapter)
 
     def test_configured_database_properties(self):
         """Postgres config should correctly parse host, port, user, password, dbname."""
         import mikiorm
-        myorm.configure({
+        mikiorm.configure({
             "default": {
                 "ENGINE": "postgresql",
                 "NAME": "test",
@@ -94,7 +95,7 @@ class TestPostgresAdapter:
         import mikiorm
         from mikiorm.settings import connection_manager
 
-        myorm.configure({
+        mikiorm.configure({
             "default": {
                 "ENGINE": "postgresql",
                 "NAME": "test",
@@ -114,7 +115,7 @@ class TestPostgresAdapter:
 class TestMySQLAdapter:
     def test_module_imports(self):
         """pymysql-based adapter should be importable."""
-        from mikiorm.connections import MySQLAdapter, MySQLConnection
+        from mikiorm.backends.mysql.base import MySQLAdapter
         adapter = MySQLAdapter()
         assert isinstance(adapter, BaseAdapter)
 
@@ -123,13 +124,13 @@ class TestConnectionManager:
     def test_get_connection_manager(self):
         from mikiorm.settings import connection_manager
         # Initially empty
-        assert len(connection_manager._connections) == 0
+        assert len(connection_manager._pools) == 0
 
     def test_get_connection_uses_pool(self):
         import mikiorm
         from mikiorm.settings import connection_manager, settings
 
-        myorm.configure({
+        mikiorm.configure({
             "default": {
                 "ENGINE": "sqlite",
                 "NAME": ":memory:",
@@ -140,14 +141,14 @@ class TestConnectionManager:
         assert hasattr(conn, "execute")
         assert hasattr(conn, "close")
         conn.close()
-        assert "default" in connection_manager._connections
+        assert "default" in connection_manager._pools
         connection_manager.close_all()
 
     def test_validate_connection(self):
         import mikiorm
         from mikiorm.settings import connection_manager
 
-        myorm.configure({
+        mikiorm.configure({
             "default": {
                 "ENGINE": "sqlite",
                 "NAME": ":memory:",
@@ -158,7 +159,7 @@ class TestConnectionManager:
         connection_manager.close_all()
 
     def test_pool_context_manager_returns_connection(self):
-        from mikiorm.connections import SQLiteAdapter
+        from mikiorm.backends.sqlite.adapter import Adapter as SQLiteAdapter
 
         adapter = SQLiteAdapter()
         pool = adapter.create_pool({"NAME": ":memory:"}, {"min_size": 1, "max_size": 1, "timeout": 5})
@@ -174,12 +175,12 @@ class TestConnectionManager:
 class TestConfigure:
     def test_configure_exposed(self):
         import mikiorm
-        assert hasattr(myorm, "configure")
-        assert callable(myorm.configure)
+        assert hasattr(mikiorm, "configure")
+        assert callable(mikiorm.configure)
 
     def test_configure_databases(self):
         import mikiorm
-        myorm.configure({
+        mikiorm.configure({
             "default": {
                 "ENGINE": "sqlite",
                 "NAME": ":memory:"

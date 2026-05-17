@@ -3,7 +3,7 @@
 Redirects to the CLI tool when the package is run as a module.
 
 Usage:
-    python -m myorm makemigrations
+    python -m mikiorm makemigrations
 """
 from .cli import main
 

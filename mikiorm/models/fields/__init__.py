@@ -15,6 +15,7 @@ import json as _json
 import uuid as _uuid
 from typing import Any, Callable, Sequence
 
+from ...validation.validators import validate_email, validate_url
 
 # ---------------------------------------------------------------------------
 # Base field
@@ -148,6 +149,32 @@ class Field:
 
         return path, attr_name, args, kwargs
 
+    def validate(self, value: Any, size: int | None = None) -> Any:
+        """Validate the value for this field."""
+        if value is None:
+            if self.primary_key and (self.auto_increment or getattr(self, "auto_increment", False)):
+                return None
+            if not self.null:
+                raise ValueError(f"Field {self.name!r} cannot be null.")
+            return None
+
+        if self.choices is not None:
+            valid_values = [choice[0] for choice in self.get_choices()]
+            if value not in valid_values:
+                raise ValueError(
+                    f"Value {value!r} is not a valid choice for field {self.name!r}."
+                )
+
+        if self.validators:
+            for validator in self.validators:
+                if not validator(value):
+                    name = getattr(validator, "__name__", str(validator))
+                    raise ValueError(
+                        f"Validation failed for field {self.name!r}: {name}"
+                    )
+
+        return value
+
 
 # ---------------------------------------------------------------------------
 # Numeric fields
@@ -161,6 +188,7 @@ class AutoField(Field):
     """
 
     primary_key: bool = True
+    auto_increment: bool = True
 
     def python_value(self, value: Any) -> int | None:
         if value is None:
@@ -396,6 +424,11 @@ class URLField(CharField):
 
     max_length: int = 200
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not self.validators:
+            self.validators.append(validate_url)
+
     def get_internal_type(self) -> str:
         return "URLField"
 
@@ -408,6 +441,11 @@ class EmailField(CharField):
     """
 
     max_length: int = 254
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not self.validators:
+            self.validators.append(validate_email)
 
     def get_internal_type(self) -> str:
         return "EmailField"
@@ -1123,9 +1161,5 @@ class ImageDescriptor(FileDescriptor):
 
 
 # Relationship field re-exports for backwards-compatible imports
-try:
-    from .relationships import ForeignKey, ManyToManyField, OneToOneField
-except ImportError:  # pragma: no cover
-    ForeignKey = None  # type: ignore[assignment]
-    ManyToManyField = None  # type: ignore[assignment]
-    OneToOneField = None  # type: ignore[assignment]
+# Note: Import directly from relationships module to avoid circular import
+from ..relationships import ForeignKey, ManyToManyField, OneToOneField

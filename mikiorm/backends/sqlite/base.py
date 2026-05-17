@@ -24,12 +24,12 @@ class SQLiteConnection(BaseConnection):
         return self._cursor
 
     def fetchall(self, sql: str, params: Iterable[Any] | None = None) -> list[tuple[Any, ...]]:
-        with self._conn.execute(sql, params or ()) as cursor:
-            return cursor.fetchall()
+        cursor = self._conn.execute(sql, params or ())
+        return cursor.fetchall()
 
     def fetchone(self, sql: str, params: Iterable[Any] | None = None) -> tuple[Any, ...] | None:
-        with self._conn.execute(sql, params or ()) as cursor:
-            return cursor.fetchone()
+        cursor = self._conn.execute(sql, params or ())
+        return cursor.fetchone()
 
     def commit(self) -> None:
         self._conn.commit()

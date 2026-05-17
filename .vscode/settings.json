@@ -1,3 +1,18 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system"
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "cSpell.words": [
+        "BYTEA",
+        "dbcheck",
+        "dflt",
+        "fdef",
+        "fobj",
+        "fromlist",
+        "ftype",
+        "introspector",
+        "makemig",
+        "miki",
+        "mikiorm",
+        "sqldiff",
+        "sqls"
+    ]
 }

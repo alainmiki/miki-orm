@@ -22,9 +22,9 @@ class QueryBuilder:
 
     def build(self, queryset: Any, connection: Any = None) -> tuple[str, tuple[Any, ...]]:
         """Build a safe SELECT query from a QuerySet."""
-        table = self.model._meta.table_name or self.model.__name__.lower()
+        table = self.model._meta.table_name or self.model.__name__.lower() + "s"
         quoted_table = self.builder.quote_table(table)
-        
+
         sql = f"SELECT * FROM {quoted_table}"
         params: list[Any] = []
 

@@ -206,3 +206,28 @@ class SchemaEditor:
 # Factory function
 def get_schema_editor(connection: Any, engine: str = "sqlite") -> SchemaEditor:
     return SchemaEditor(connection, engine)
+
+
+class CollectingSchemaEditor(SchemaEditor):
+    """A mock SchemaEditor that collects operations instead of executing them."""
+
+    def __init__(self):
+        # Pass dummy connection and builder, as we won't execute SQL
+        # We need a valid builder for deconstruction, so let's use a default one.
+        from mikiorm.query.safe_builder import get_safe_builder
+        from mikiorm.settings import settings
+
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        super().__init__(
+            connection=None, engine=engine
+        )  # Pass a dummy connection, but a real builder
+        self.collected_operations = []
+
+    def execute(self, sql: str, params: Optional[list[Any]] = None) -> None:
+        """Override execute to do nothing, as we are collecting."""
+        pass
+
+    def execute_operation(self, op: operations.MigrationOperation) -> None:
+        """Collects the migration operation."""
+        self.collected_operations.append(op)

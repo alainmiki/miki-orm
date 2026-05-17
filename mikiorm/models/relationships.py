@@ -88,11 +88,19 @@ class ForeignKey(Field):
     def db_value(self, value: Any) -> Any:
         """Return the PK value for DB storage."""
         if value is None:
-            return None if self.null else 0
-        # If it's a Model instance, extract the PK
+            if self.null:
+                return None
+            raise ValueError("This ForeignKey does not allow null values.")
         if hasattr(value, "pk"):
             return value.pk
         return value
+
+    def validate(self, value: Any) -> Any:
+        if value is None:
+            return super().validate(value)
+        if hasattr(value, "pk"):
+            return getattr(value, "pk")
+        return super().validate(value)
 
     def get_internal_type(self) -> str:
         return "ForeignKey"
@@ -148,3 +156,26 @@ class ManyToManyField(Field):
 
     def get_internal_type(self) -> str:
         return "ManyToManyField"
+
+
+class ReverseForeignKeyDescriptor:
+    def __init__(self, field: ForeignKey, source_model: type[Any]) -> None:
+        self.field = field
+        self.source_model = source_model
+
+    def __get__(self, instance: Any, owner: Any) -> Any:
+        if instance is None:
+            return self
+        return self.source_model.objects.filter(**{self.field.name: instance.pk})
+
+
+class ReverseOneToOneDescriptor(ReverseForeignKeyDescriptor):
+    def __get__(self, instance: Any, owner: Any) -> Any:
+        if instance is None:
+            return self
+        from .base import ObjectDoesNotExist
+
+        try:
+            return self.source_model.objects.get(**{self.field.name: instance.pk})
+        except ObjectDoesNotExist:
+            return None

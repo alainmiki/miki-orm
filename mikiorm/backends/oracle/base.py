@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Tuple, Optional
 
-from ...connections.base import BaseAdapter, BaseConnection
-
+from ...backends.base import BaseAdapter, BaseConnection
 
 class OracleConnection(BaseConnection):
     """Oracle connection wrapper with secure parameterized queries.

@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
 from mikiorm import models
+from mikiorm.migrations.engine import MigrationEngine
 from mikiorm.managers.base import Manager
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tasks.db")
@@ -141,6 +142,10 @@ def run():
     cleanup()
     configure()
 
+    # Run migrations for the models
+    ops = MigrationEngine().makemigrations([Project, Task, TimeLog])
+    MigrationEngine().migrate_direct(ops)
+
     # ---- Create projects ----
     proj1 = Project.objects.create(
         name="Website Redesign", slug="website-redesign",
@@ -236,7 +241,7 @@ def run():
 
     # ---- ORDERING ----
     by_priority = Task.objects.all().order_by("priority", "-created_at")
-    print(f"\nTasks by priority:")
+    print("\nTasks by priority:")
     for t in by_priority:
         print(f"  {t.priority}: {t.title}")
 
@@ -258,7 +263,7 @@ def run():
 
     # ---- VALUES / VALUES_LIST ----
     task_summaries = Task.objects.filter(is_completed=False).values("title", "priority", "assignee")
-    print(f"\nActive task summaries:")
+    print("\nActive task summaries:")
     for s in task_summaries:
         print(f"  {s}")
 
