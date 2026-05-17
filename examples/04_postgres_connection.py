@@ -24,9 +24,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import models
+from mikiorm import makemigrations, migrate, models
 from mikiorm.settings import settings, connection_manager
-# from mikiorm.migrations.engine import MigrationEngine # No longer needed directly here
+from mikiorm.migrations.engine import MigrationEngine
 from mikiorm.backends.postgresql import PostgresAdapter
 
 
@@ -120,10 +120,10 @@ def run_crud(backend):
     """Run a full round of CRUD operations."""
     print(f"\n--- Running CRUD Operations on {backend} ---")
 
-    # Use MigrationEngine directly as per updated cli/init
+    # Use standard migration flow: reflect models → write migration file → apply
     from mikiorm.migrations.engine import MigrationEngine
-    MigrationEngine().makemigrations([Product, Review])
-    MigrationEngine().migrate()
+    makemigrations([Product, Review])
+    migrate()
     print("  [OK] Tables created via migrate()")
 
     # ---- CREATE ----
@@ -218,13 +218,12 @@ def run_crud(backend):
 
 
 def cleanup(conn):
-    """Drop test tables to leave a clean state."""
+    """Roll back migration history but leave the DB intact."""
     print("\n--- Cleanup ---")
     try:
-        conn.execute('DROP TABLE IF EXISTS "reviews"')
-        conn.execute('DROP TABLE IF EXISTS "products"')
-        conn.commit()
-        print("  [OK] Dropped test tables")
+        engine = MigrationEngine()
+        engine.rollback(connection=conn, steps=999)
+        print("  [OK] Rolled back all migrations")
     except Exception as e:
         print("  [WARN] Cleanup warning: %s" % e)
 

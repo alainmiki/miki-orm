@@ -6,6 +6,15 @@
 ## Vision
 Build a framework-agnostic ORM with Django-like ergonomics, strong type-safe queries, and production-grade migration tooling. The library should be easy to adopt from any Python app while supporting both sync and async database workflows.
 
+## Most do what is bellow
+always read and study the django db folder to understand what this orm is all about and get some insight from the django codebase
+- django db link: https://github.com/django/django/tree/main/django/db
+- django backends link: https://github.com/django/django/tree/main/django/db/backends
+- in real world use cases and example and how the orm should work all models most be registered to be found during makemigrations and migrate. migrations most be generated before migrated with migrate command before any table/field/columns changes is created,updated or altered.
+- the orm should be be db backend aware . pools logic should be execute fast without hanging same with migrations and commands
+
+
+
 ## Key objectives
 - Deliver a consistent API surface for models, querysets, managers, migrations, and transactions.
 - Expose a clean top-level package API such as `from mikiorm.models import Model`, `from mikiorm.managers import BaseManager`, and `from mikiorm.backends import Postgres`.

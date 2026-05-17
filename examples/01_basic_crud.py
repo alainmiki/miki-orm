@@ -19,7 +19,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import models
+from mikiorm import makemigrations, migrate, models
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "blog.db")
 
@@ -27,6 +27,10 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "blog.db")
 def cleanup():
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
+    import shutil
+    mig_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "migrations")
+    if os.path.exists(mig_dir):
+        shutil.rmtree(mig_dir)
 
 
 def configure():
@@ -90,6 +94,11 @@ class Post(models.Model):
 def run():
     cleanup()
     configure()
+
+    # Run migrations so tables are created through the migration workflow
+    makemigrations([Author, Category, Post])
+    migrate()
+    print("  [OK] Schema initialized via migrations.")
 
     # ---- CREATE via .objects.create() ----
     alice = Author.objects.create(

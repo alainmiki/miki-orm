@@ -163,6 +163,27 @@ class ModelMeta(type):
         return cls
 
 
+def register(*models: type[Model]) -> type[Model] | None:
+    """
+    Universal standard way to register models. 
+    Can be used as a decorator or a function call.
+    
+    This ensures models in any folder are discovered for migrations 
+    as long as the file is imported once.
+
+    Usage:
+        @register
+        class User(Model): ...
+        
+        register(OtherModel, AnotherModel)
+    """
+    for model in models:
+        ModelRegistry.register_model(model)
+    if len(models) == 1:
+        return models[0]
+    return None
+
+
 class Model(metaclass=ModelMeta):
     """Base model class with ORM-like behaviour."""
 
@@ -468,6 +489,9 @@ class Model(metaclass=ModelMeta):
             )
             self._execute_update(conn)
         conn.commit()
+        # Release the connection back to the pool if it's pooled
+        if connection is None and hasattr(conn, 'close'):
+            conn.close()
 
     def delete(self, connection: Any = None) -> None:
         """Delete this model instance.
@@ -486,6 +510,9 @@ class Model(metaclass=ModelMeta):
 
         self._execute_delete(conn)
         conn.commit()
+        # Release the connection back to the pool if it's pooled
+        if connection is None and hasattr(conn, 'close'):
+            conn.close()
 
     async def async_save(self, connection: Any = None, *, force_insert: bool = False) -> None:
         """Asynchronously persist this model instance.

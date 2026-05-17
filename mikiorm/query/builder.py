@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .safe_builder import get_safe_builder
+from mikiorm.backends.base.dialect import get_safe_builder
 from mikiorm.conf.settings import settings
 
 logger = logging.getLogger(__name__)

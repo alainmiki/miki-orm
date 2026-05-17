@@ -21,8 +21,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import models
-from mikiorm.migrations.engine import MigrationEngine
+from mikiorm import makemigrations, migrate, models
 from mikiorm.managers.base import Manager
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tasks.db")
@@ -31,6 +30,10 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "tasks.db")
 def cleanup():
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
+    import shutil
+    mig_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "migrations")
+    if os.path.exists(mig_dir):
+        shutil.rmtree(mig_dir)
 
 
 def configure():
@@ -142,9 +145,10 @@ def run():
     cleanup()
     configure()
 
-    # Run migrations for the models
-    ops = MigrationEngine().makemigrations([Project, Task, TimeLog])
-    MigrationEngine().migrate_direct(ops)
+    # Run migrations so tables are created through the migration workflow
+    makemigrations([Project, Task, TimeLog])
+    migrate()
+    print("  [OK] Schema initialized via migrations.")
 
     # ---- Create projects ----
     proj1 = Project.objects.create(

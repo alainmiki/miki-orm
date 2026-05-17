@@ -22,14 +22,22 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import models
+from mikiorm import makemigrations, migrate, models
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "social.db")
 
+MIGRATIONS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "migrations"
+)
+
 
 def cleanup():
+    import shutil
+
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
+    if os.path.exists(MIGRATIONS_DIR):
+        shutil.rmtree(MIGRATIONS_DIR)
 
 
 def configure(backend="sqlite"):
@@ -151,9 +159,10 @@ def run(backend="sqlite"):
     
     configure(backend)
 
-    # Initialize schema
-    mikiorm.makemigrations([User, Follow, Post, Comment, Like, Message])
-    mikiorm.migrate()
+    # Initialize schema via migration workflow
+    makemigrations([User, Follow, Post, Comment, Like, Message])
+    migrate()
+    print("  [OK] Schema initialized via migrations.")
 
     # ---- Create users ----
     users_data = [

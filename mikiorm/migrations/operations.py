@@ -83,6 +83,13 @@ class AlterField(MigrationOperation):
             "field_kwargs": kwargs,
             "field": field,  # Store the field object for schema editor
         }
+        if old_field:
+            old_path, _, _, old_kwargs = old_field.deconstruct()
+            payload.update({
+                "old_field_type": old_path,
+                "old_field_kwargs": old_kwargs,
+                "old_field": old_field,
+            })
         super().__init__()
         self.operation_type = "alter_field"
         self.payload = payload

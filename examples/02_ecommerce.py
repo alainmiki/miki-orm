@@ -20,14 +20,18 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import models
+from mikiorm import makemigrations, migrate, models
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "ecommerce.db")
 
 
 def cleanup():
+    import shutil
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
+    mig_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "migrations")
+    if os.path.exists(mig_dir):
+        shutil.rmtree(mig_dir)
 
 
 def configure():
@@ -131,6 +135,11 @@ class OrderItem(models.Model):
 def run():
     cleanup()
     configure()
+
+    # Run migrations so tables are created through the migration workflow
+    makemigrations([Customer, Address, Product, Order, OrderItem])
+    migrate()
+    print("  [OK] Schema initialized via migrations.")
 
     # ---- Create customers ----
     cust1 = Customer.objects.create(

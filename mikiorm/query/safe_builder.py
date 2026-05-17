@@ -42,6 +42,10 @@ class SQLiteBuilder(SafeBuilder):
     def quote_table(self, name: str) -> str:
         return f'"{name}"'
 
+    @property
+    def param_placeholder(self) -> str:
+        return "?"
+
     def get_placeholder(self, index: int | None = None) -> str:
         return "?"
 
@@ -55,6 +59,10 @@ class PostgresBuilder(SafeBuilder):
 
     def quote_table(self, name: str) -> str:
         return f'"{name}"'
+
+    @property
+    def param_placeholder(self) -> str:
+        return "%s"
 
     def get_placeholder(self, index: int | None = None) -> str:
         return f"${index}" if index is not None else "$1"
@@ -70,6 +78,10 @@ class MySQLBuilder(SafeBuilder):
     def quote_table(self, name: str) -> str:
         return f"`{name}`"
 
+    @property
+    def param_placeholder(self) -> str:
+        return "%s"
+
     def get_placeholder(self, index: int | None = None) -> str:
         return "%s"
 
@@ -83,6 +95,10 @@ class OracleBuilder(SafeBuilder):
 
     def quote_table(self, name: str) -> str:
         return f'"{name.upper()}"'
+
+    @property
+    def param_placeholder(self) -> str:
+        return ":1"
 
     def get_placeholder(self, index: int | None = None) -> str:
         return f":{index}" if index is not None else ":1"

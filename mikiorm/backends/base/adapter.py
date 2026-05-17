@@ -7,6 +7,7 @@ Concrete subclasses live under ``mikiorm.backends.{sqlite,postgresql,mysql,...}`
 """
 
 from __future__ import annotations
+import asyncio
 
 from abc import ABC, abstractmethod
 from typing import Any, Iterable
@@ -26,6 +27,9 @@ class BaseConnection(ABC):
 
     #: Placeholder style for this dialect (``?`` for SQLite, ``%s`` elsewhere).
     param_placeholder: str = "?"
+
+    #: The SQL query used for minimal liveness checking.
+    validation_query: str = "SELECT 1"
 
     @abstractmethod
     def execute(self, sql: str, params: Iterable[Any] | None = None) -> Any:
@@ -57,7 +61,7 @@ class BaseConnection(ABC):
     def is_valid(self) -> bool:
         """Cheap liveness probe used by pool validation."""
         try:
-            return bool(self.fetchone("SELECT 1", ()))
+            return bool(self.fetchone(self.validation_query, ()))
         except Exception:
             return False
 
@@ -93,6 +97,9 @@ class BaseAsyncConnection(ABC):
 
     param_placeholder: str = "?"
 
+    #: The SQL query used for minimal liveness checking.
+    validation_query: str = "SELECT 1"
+
     @abstractmethod
     async def execute(self, sql: str, params: Iterable[Any] | None = None) -> Any: ...
 
@@ -118,9 +125,14 @@ class BaseAsyncConnection(ABC):
     async def begin(self) -> None:
         """Begin an explicit transaction (overridden if the driver requires it)."""
 
-    async def is_valid(self) -> bool:
+    async def is_valid(self, timeout: float = 5.0) -> bool:
+        """Cheap async liveness probe with a timeout to prevent hanging."""
         try:
-            return bool(await self.fetchone("SELECT 1", ()))
+            result = await asyncio.wait_for(
+                self.fetchone(self.validation_query, ()),
+                timeout=timeout
+            )
+            return bool(result)
         except Exception:
             return False
 

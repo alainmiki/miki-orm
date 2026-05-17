@@ -18,21 +18,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import models
-from mikiorm.migrations.engine import MigrationEngine
-from mikiorm.settings import settings as mikiorm_settings
-from mikiorm.backends.sqlite import SQLiteAdapter
+from mikiorm import makemigrations, migrate, models
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "school.db")
-MIGRATIONS_DIR = os.path.join(os.path.dirname(__file__), "school_migrations")
 
 
 def cleanup():
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
-    import shutil
-    if os.path.exists(MIGRATIONS_DIR):
-        shutil.rmtree(MIGRATIONS_DIR)
 
 
 def configure():
@@ -147,25 +140,10 @@ def run():
     print("PART 1: Migrations")
     print("=" * 60)
 
-    # Create tables directly (simulating makemigrations + migrate)
-    db_config = mikiorm_settings.get_database("default")
-    adapter = SQLiteAdapter()
-    conn = adapter.connect(db_config.get_connection_config())
-
-    engine = MigrationEngine(migrations_path=MIGRATIONS_DIR)
-
-    # Generate migrations from models
-    ops = engine.makemigrations([Student, Teacher, Course, Enrollment, Attendance])
-    print(f"Generated {len(ops)} migration operation(s)")
-
-    # Apply migrations directly to create tables
-    engine.migrate_direct(ops, connection=conn)
-    conn.commit()
-    print("Tables created via migration engine")
-
-    # Show migration history
-    history = engine.show_history()
-    print(f"Migration history: {history}")
+    # Generate and apply all table-creation migrations through the standard flow
+    makemigrations([Student, Teacher, Course, Enrollment, Attendance])
+    migrate()
+    print("  [OK] Database schema initialized via migrations.")
 
     # =========================================================================
     # PART 2: Create Data

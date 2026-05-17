@@ -20,6 +20,8 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import time
+import asyncio
 import threading
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterator, Optional
@@ -96,15 +98,23 @@ def _mysql_async() -> type[BaseAsyncAdapter]:
     return AsyncMySQLAdapter
 
 
+def _oracle_sync() -> type[BaseAdapter]:
+    from ..backends.oracle.base import OracleAdapter
+
+    return OracleAdapter
+
+
 # Register the built-in engines.
 for _name, _sync, _async in (
     ("sqlite", _sqlite_sync, _sqlite_async),
     ("postgresql", _postgres_sync, _postgres_async),
     ("postgres", _postgres_sync, _postgres_async),  # alias
     ("mysql", _mysql_sync, _mysql_async),
+    ("oracle", _oracle_sync, None),
 ):
     register_sync_adapter(_name, _sync)
-    register_async_adapter(_name, _async)
+    if _async:
+        register_async_adapter(_name, _async)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +206,10 @@ class DatabaseConfig:
             "max_lifetime": float(self.pool.get("max_lifetime", 0)),
             "max_uses": int(self.pool.get("max_uses", 0)),
             "pre_ping": bool(self.pool.get("pre_ping", False)),
+            "max_retries": int(self.pool.get("max_retries", 3)),
+            "retry_delay": float(self.pool.get("retry_delay", 0.5)),
+            "cb_threshold": int(self.pool.get("cb_threshold", 5)),
+            "cb_timeout": float(self.pool.get("cb_timeout", 60.0)),
         }
 
 
@@ -223,15 +237,36 @@ class ConnectionManager:
                 if db_alias not in self._pools:
                     db_config = settings.get_database(db_alias)
                     adapter = db_config.get_sync_adapter()
+                    pool_config = db_config.get_pool_config()
+                    
+                    logger.debug("Initializing sync connection pool for %s", db_alias)
                     self._pools[db_alias] = adapter.create_pool(
                         db_config.get_connection_config(),
-                        db_config.get_pool_config(),
+                        pool_config,
                     )
         return self._pools[db_alias]
 
     def get_connection(self, db_alias: str = "default") -> PooledConnection:
         """Borrow a pooled connection.  Caller must release/close it."""
-        return self.get_pool(db_alias).acquire()
+        db_config = settings.get_database(db_alias)
+        pool_config = db_config.get_pool_config()
+        max_retries = pool_config["max_retries"]
+        retry_delay = pool_config["retry_delay"]
+
+        for attempt in range(max_retries + 1):
+            try:
+                return self.get_pool(db_alias).acquire()
+            except TimeoutError:
+                if attempt >= max_retries:
+                    logger.error("Failed to acquire connection from pool %s after %d retries", db_alias, max_retries)
+                    raise
+                
+                wait = retry_delay * (2 ** attempt)
+                logger.warning(
+                    "Connection pool %s exhausted. Retrying in %.2fs (attempt %d/%d)",
+                    db_alias, wait, attempt + 1, max_retries
+                )
+                time.sleep(wait)
 
     @contextmanager
     def connection(self, db_alias: str = "default") -> Iterator[PooledConnection]:
@@ -244,7 +279,7 @@ class ConnectionManager:
     def validate_connection(self, db_alias: str = "default") -> bool:
         try:
             with self.connection(db_alias) as conn:
-                return bool(conn.fetchone("SELECT 1", ()))
+                return conn.is_valid()
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("validate_connection(%s) failed: %s", db_alias, exc)
             return False
@@ -258,41 +293,147 @@ class ConnectionManager:
         self._pools.clear()
 
 
+class CircuitBreaker:
+    """Simple circuit breaker to handle database downtime."""
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 60.0):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failures = 0
+        self.last_failure_time = 0.0
+        self.state = "CLOSED"
+
+    def record_failure(self):
+        self.failures += 1
+        self.last_failure_time = time.monotonic()
+        if self.failures >= self.failure_threshold:
+            self.state = "OPEN"
+
+    def record_success(self):
+        self.failures = 0
+        self.state = "CLOSED"
+
+    def can_execute(self) -> bool:
+        if self.state == "OPEN":
+            if (time.monotonic() - self.last_failure_time) > self.recovery_timeout:
+                self.state = "HALF_OPEN"
+                return True
+            return False
+        return True
+
+
+class AsyncConnectionContext:
+    """Async context manager for acquiring and releasing pooled connections."""
+
+    def __init__(self, manager: AsyncConnectionManager, db_alias: str) -> None:
+        self.manager = manager
+        self.db_alias = db_alias
+        self.conn: Optional[PooledAsyncConnection] = None
+
+    async def __aenter__(self) -> PooledAsyncConnection:
+        self.conn = await self.manager.get_connection(self.db_alias)
+        return self.conn
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self.conn:
+            try:
+                await self.conn.close()
+            except Exception:
+                pass
+
+
 class AsyncConnectionManager:
     """Async counterpart of :class:`ConnectionManager`."""
 
     def __init__(self) -> None:
         self._pools: Dict[str, AsyncConnectionPool] = {}
-        self._lock_factory = None  # asyncio.Lock created lazily per loop
+        self._lock: Optional[asyncio.Lock] = None
+        self._circuit_breakers: Dict[str, CircuitBreaker] = {}
+
+    def _get_circuit_breaker(self, db_alias: str) -> CircuitBreaker:
+        if db_alias not in self._circuit_breakers:
+            db_config = settings.get_database(db_alias)
+            pool_config = db_config.get_pool_config()
+            self._circuit_breakers[db_alias] = CircuitBreaker(
+                failure_threshold=pool_config["cb_threshold"],
+                recovery_timeout=pool_config["cb_timeout"]
+            )
+        return self._circuit_breakers[db_alias]
+
+    def _get_lock(self) -> asyncio.Lock:
+        """Lazy-init the lock to ensure it is created in the correct event loop."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def get_pool(self, db_alias: str = "default") -> AsyncConnectionPool:
         if db_alias not in self._pools:
-            db_config = settings.get_database(db_alias)
-            adapter = db_config.get_async_adapter()
-            self._pools[db_alias] = await adapter.create_pool(
-                db_config.get_connection_config(),
-                db_config.get_pool_config(),
-            )
+            async with self._get_lock():
+                # Double-check pattern to avoid redundant pool creation
+                if db_alias not in self._pools:
+                    db_config = settings.get_database(db_alias)
+                    try:
+                        adapter = db_config.get_async_adapter()
+                    except ValueError as e:
+                        raise RuntimeError(f"Async operations not supported for engine {db_config.engine}: {e}")
+                        
+                    self._pools[db_alias] = await adapter.create_pool(
+                        db_config.get_connection_config(),
+                        db_config.get_pool_config(),
+                    )
         return self._pools[db_alias]
 
     async def get_connection(self, db_alias: str = "default") -> PooledAsyncConnection:
-        pool = await self.get_pool(db_alias)
-        return await pool.acquire()
+        """Borrow a pooled connection with exponential backoff and retry (async)."""
+        cb = self._get_circuit_breaker(db_alias)
+        if not cb.can_execute():
+            raise RuntimeError(f"Circuit breaker is OPEN for database {db_alias}")
+
+        db_config = settings.get_database(db_alias)
+        pool_config = db_config.get_pool_config()
+        max_retries = pool_config["max_retries"]
+        retry_delay = pool_config["retry_delay"]
+
+        for attempt in range(max_retries + 1):
+            try:
+                pool = await self.get_pool(db_alias)
+                conn = await pool.acquire()
+                cb.record_success()
+                return conn
+            except asyncio.TimeoutError:
+                if attempt >= max_retries:
+                    cb.record_failure()
+                    logger.error("Async: Failed to acquire connection from pool %s after %d retries", db_alias, max_retries)
+                    raise
+
+                wait = retry_delay * (2 ** attempt)
+                logger.warning(
+                    "Async: Connection pool %s exhausted. Retrying in %.2fs (attempt %d/%d)",
+                    db_alias, wait, attempt + 1, max_retries
+                )
+                await asyncio.sleep(wait)
+            except Exception:
+                cb.record_failure()
+                raise
+
+    @contextmanager
+    def connection(self, db_alias: str = "default"):
+        """
+        This is a legacy helper. For async usage, prefer the manual 
+        acquire/release pattern or implement an async context manager.
+        """
+        raise RuntimeError("Use 'async with connection_manager.async_connection()' for async logic.")
+
+    def async_connection(self, db_alias: str = "default") -> AsyncConnectionContext:
+        """Borrow a pooled connection via async context manager."""
+        return AsyncConnectionContext(self, db_alias)
 
     async def validate_connection(self, db_alias: str = "default") -> bool:
         try:
-            conn = await self.get_connection(db_alias)
+            async with self.async_connection(db_alias) as conn:
+                return await conn.is_valid(timeout=5.0)
         except Exception:
             return False
-        try:
-            return bool(await conn.fetchone("SELECT 1", ()))
-        except Exception:
-            return False
-        finally:
-            try:
-                await conn.close()
-            except Exception:
-                pass
 
     async def close_all(self) -> None:
         for pool in list(self._pools.values()):

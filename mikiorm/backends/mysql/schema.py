@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Type
 
-from mikiorm.query.safe_builder import SafeBuilder
+from mikiorm.query.safe_builder import SafeBuilder, Dialect
+from mikiorm.backends.base.schema import BaseSchemaEditor
 
 
-class DatabaseSchemaEditor:
+class DatabaseSchemaEditor(BaseSchemaEditor):
     """Encapsulates SQL schema editing for MySQL."""
 
     sql_create_table = "CREATE TABLE {table} ({definition}){extra}"
@@ -17,10 +18,10 @@ class DatabaseSchemaEditor:
     sql_rename_table = "RENAME TABLE {old_table} TO {new_table}"
     
     def __init__(self, connection: Any, collect_sql: bool = False, atomic: bool = True) -> None:
-        self.connection = connection
+        super().__init__(connection)
         self.collect_sql = collect_sql
         self.atomic = atomic
-        self.builder = SafeBuilder()
+        self.builder = SafeBuilder(Dialect.MYSQL)
         self._sql_statements: list[str] = []
 
     def _execute(self, sql: str, params: tuple = ()) -> None:
@@ -156,10 +157,10 @@ class DatabaseSchemaEditor:
         }
         return field_type_map.get(field.__class__.__name__, 'TEXT')
 
-    def create_index(self, model: Any, fields: list, name: str, unique: bool = False) -> None:
+    def create_index(self, model: Any, fields: list[Any], name: str, unique: bool = False) -> None:
         """Create an index."""
         table = self.builder.quote_table(model._meta.table_name or model.__name__.lower() + 's')
-        columns = ", ".join(self.builder.quote_column(f.name) for f in fields)
+        columns = ", ".join(self.builder.quote_column(f.column if hasattr(f, 'column') else f.name) for f in fields)
         
         if unique:
             sql = f"CREATE UNIQUE INDEX {self.builder.quote_column(name)} ON {table} ({columns})"
@@ -168,8 +169,8 @@ class DatabaseSchemaEditor:
         
         self._execute(sql)
 
-    def delete_index(self, model: Any, name: str) -> None:
-        """Delete an index."""
+    def drop_index(self, model: Any, name: str) -> None:
+        """Drop an index."""
         table = self.builder.quote_table(model._meta.table_name or model.__name__.lower() + 's')
         sql = self.sql_delete_unique.format(name=self.builder.quote_column(name), table=table)
         self._execute(sql)

@@ -26,8 +26,13 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "library.db")
 
 
 def cleanup():
+    import shutil
+
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
+    mig_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "migrations")
+    if os.path.exists(mig_dir):
+        shutil.rmtree(mig_dir)
 
 
 def configure(backend="sqlite"):

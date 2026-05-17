@@ -1,7 +1,7 @@
 """Model definitions package."""
 
 from . import fields
-from .base import Model, ModelMeta, ObjectDoesNotExist, MultipleObjectsReturned, ConcurrencyError
+from .base import Model, ModelMeta, ObjectDoesNotExist, MultipleObjectsReturned, ConcurrencyError, register
 from .fields import (
     AutoField,
     BigAutoField,
@@ -52,6 +52,7 @@ __all__ = [
     "ObjectDoesNotExist",
     "MultipleObjectsReturned",
     "ConcurrencyError",
+    "register",
     # --- fields ---
     "Field",
     "AutoField",

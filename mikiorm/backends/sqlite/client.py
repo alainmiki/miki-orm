@@ -14,9 +14,9 @@ from mikiorm.backends.base.adapter import (
 from mikiorm.backends.base.base import BaseDatabaseWrapper, DatabaseSettings
 from mikiorm.backends.base.pool import (
     AsyncConnectionPool,
-    ConnectionPool,
     PooledAsyncConnection,
     PooledConnection,
+    SyncConnectionPool,
 )
 from mikiorm.backends.sqlite.introspection import SQLiteIntrospection
 from mikiorm.backends.sqlite.schema import SQLiteSchemaEditor
@@ -24,6 +24,8 @@ from mikiorm.backends.sqlite.schema import SQLiteSchemaEditor
 
 class SQLiteConnection(BaseConnection):
     """Wrapper for sqlite3.Connection."""
+
+    param_placeholder = "?"
 
     def __init__(self, connection: sqlite3.Connection):
         self._connection = connection
@@ -51,6 +53,14 @@ class SQLiteConnection(BaseConnection):
     def close(self) -> None:
         self._connection.close()
 
+    def is_valid(self) -> bool:
+        """Check if the connection is still valid."""
+        try:
+            self._connection.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
+
     def __enter__(self):
         return self
 
@@ -63,18 +73,10 @@ class SQLiteAdapter(BaseAdapter):
 
     connection_class: Type[BaseConnection] = SQLiteConnection
 
-    def get_connection(self, config: DatabaseSettings) -> BaseConnection:
-        conn = sqlite3.connect(config.name)
+    def connect(self, config: dict[str, Any]) -> BaseConnection:
+        conn = sqlite3.connect(config.get("NAME", ":memory:"))
+        conn.row_factory = sqlite3.Row
         return self.connection_class(conn)
-
-    def get_connection_pool(self, config: DatabaseSettings) -> ConnectionPool:
-        # SQLite connections are typically not pooled in the same way as network DBs
-        # For simplicity, we'll return a basic pool that creates a new connection each time.
-        # In a real scenario, for in-memory DBs, pooling might be different.
-        def creator():
-            return self.get_connection(config)
-
-        return ConnectionPool(creator=creator, max_size=1, acquire_timeout=0)
 
     def release(self, connection: PooledConnection) -> None:
         connection.close()
@@ -120,7 +122,7 @@ class SQLiteAsyncAdapter(BaseAsyncAdapter):
 
     connection_class: Type[BaseAsyncConnection] = SQLiteAsyncConnection
 
-    async def get_connection(self, config: DatabaseSettings) -> BaseAsyncConnection:
+    async def connect(self, config: dict[str, Any]) -> BaseAsyncConnection:
         try:
             import aiosqlite
         except ImportError:
@@ -128,15 +130,9 @@ class SQLiteAsyncAdapter(BaseAsyncAdapter):
                 "The 'aiosqlite' library is required for async SQLite support."
                 "Install it with 'pip install aiosqlite'."
             )
-        conn = await aiosqlite.connect(config.name)
+        conn = await aiosqlite.connect(config.get("NAME", ":memory:"))
         conn.row_factory = sqlite3.Row
         return self.connection_class(conn)
-
-    async def get_connection_pool(self, config: DatabaseSettings) -> AsyncConnectionPool:
-        async def creator():
-            return await self.get_connection(config)
-
-        return AsyncConnectionPool(creator=creator, max_size=1, acquire_timeout=0)
 
     async def release(self, connection: PooledAsyncConnection) -> None:
         await connection.close()

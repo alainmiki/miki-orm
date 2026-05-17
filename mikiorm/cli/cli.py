@@ -220,13 +220,42 @@ def main():
         elif args.command == "check":
             logger.info("Performing system checks...")
 
-            # Validate Models
+            # 1. Verify App Registry and Models
+            from mikiorm.settings import settings
+            logger.info(f"  Checking registered apps: {settings.installed_apps}")
+
             models = ModelRegistry.all_models()
-            logger.info(f"  [OK] {len(models)} model(s) registered.")
+            if not models:
+                logger.warning("  [WARN] No models found in the registry. Check INSTALLED_APPS and imports.")
+            else:
+                logger.info(f"  [OK] {len(models)} model(s) registered.")
 
             # Validate Connection
             if connection_manager.validate_connection():
                 logger.info("  [OK] Database settings and connection validated.")
+
+                engine = MigrationEngine()
+                with connection_manager.get_connection() as conn:
+                    # 2. Check for unapplied migration files
+                    unapplied = engine.get_unapplied_migrations(conn)
+                    if unapplied:
+                        logger.error(f"  [FAIL] {len(unapplied)} migration(s) are pending application.")
+                        for m in unapplied:
+                            logger.error(f"         - {m}")
+                        logger.error("         Run 'migrate' to apply them.")
+                    else:
+                        logger.info("  [OK] Database is up to date with migration files.")
+
+                    # 3. Check for model changes not yet in migration files
+                    missing_ops = engine.get_missing_migration_operations(conn)
+                    if missing_ops:
+                        logger.error("  [FAIL] Changes detected in models that are not in migration files.")
+                        logger.error("         Run 'makemigrations' to update migration files.")
+                    else:
+                        logger.info("  [OK] All models have corresponding migration files.")
+                        
+                if unapplied or missing_ops:
+                    sys.exit(1)
             else:
                 logger.error("  [FAIL] Database connection check failed.")
                 sys.exit(1)

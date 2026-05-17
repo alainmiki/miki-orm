@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from .schema import get_introspector
+from ..backends.base.dialect import get_safe_builder
 from ..models.registry import ModelRegistry
 from ..models.fields import (
     AutoField, BigAutoField, SmallAutoField,
@@ -69,10 +70,10 @@ class SchemaDiffGenerator:
     def _field_to_column_def(self, field: Any) -> Dict[str, Any]:
         """Convert a Field instance to a column definition dict."""
         is_pk = field.primary_key
-        sql_type = self._sql_type_for_field(field, include_auto=is_pk)
+        sql_type = self._sql_type_for_field(field)
 
         col_def = {
-            "name": field.column, # Use field.column for DB column name
+            "name": field.name,
             "type": sql_type,
             "null": field.null,
             "default": field.default if not is_pk else None,
@@ -132,6 +133,10 @@ class SchemaDiffGenerator:
         ops = []
         db_schema = self._get_db_schema()
         model_classes = ModelRegistry.all_models()
+
+        if not model_classes:
+            logger.debug("No models found in Registry during diff.")
+            return []
 
         # Filter models if app_labels (interpreted as model names) are provided
         if self.app_labels:
@@ -205,7 +210,9 @@ class SchemaDiffGenerator:
                 model_def = self._field_to_column_def(model_field)
 
                 if self._column_changed(db_col, model_def):
-                    ops.append(AlterField(model_name=table_name, field=model_field))
+                    # Provide the old_field state by reconstructing it from DB metadata
+                    old_field = self._reconstruct_field(db_col, model_field)
+                    ops.append(AlterField(model_name=table_name, field=model_field, old_field=old_field))
 
             # Index differences - simplified: check Meta.indexes
             model_indexes = getattr(model_cls._meta, "indexes", [])
@@ -242,6 +249,17 @@ class SchemaDiffGenerator:
                 logger.debug(f"Column {model_def['name']} changed: {attr} db={db_val} model={model_val}")
                 return True
         return False
+
+    def _reconstruct_field(self, db_col: Dict[str, Any], current_field: Any) -> Any:
+        """Reconstruct a Field instance representing the state currently in the DB."""
+        from copy import copy
+        old_field = copy(current_field)
+        old_field.null = db_col["null"]
+        old_field.primary_key = db_col["primary_key"]
+        old_field.default = db_col.get("default")
+        if "unique" in db_col:
+            old_field.unique = db_col["unique"]
+        return old_field
 
     def _normalize_type(self, type_str: Optional[str], is_pk: bool) -> str:
         """Normalize type strings across different backends."""

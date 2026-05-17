@@ -517,9 +517,23 @@ class DateTimeField(Field):
             return value
         if isinstance(value, str):
             # Parse ISO format strings returned by SQLite and other backends
-            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f%z", "%Y-%m-%d %H:%M:%S.%f",
+                        "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M:%S",
+                        "%Y-%m-%d %H:%M", "%Y-%m-%d"):
                 try:
                     return datetime.strptime(value, fmt)
+                except ValueError:
+                    continue
+            # Handle UTC offset suffix like '+00:00' by stripping it and retrying
+            stripped = value
+            for suffix in ("+00:00", "+0000", "Z"):
+                if stripped.endswith(suffix):
+                    stripped = stripped[: -len(suffix)]
+                    break
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S",
+                        "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(stripped, fmt)
                 except ValueError:
                     continue
             raise TypeError(

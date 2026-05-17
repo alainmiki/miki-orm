@@ -1,41 +1,64 @@
-"""Oracle database backend base classes."""
+"""Oracle backend base connection."""
 
 from __future__ import annotations
+from typing import Any, Iterable, Dict
+from ..base.adapter import BaseConnection, BaseAdapter
 
-from typing import Any, Dict, Iterable, List, Tuple, Optional
 
-from ...backends.base import BaseAdapter, BaseConnection
+class OracleAdapter(BaseAdapter):
+    """Oracle synchronous adapter: builds connections from config."""
+
+    def connect(self, config: Dict[str, Any]) -> OracleConnection:
+        """Create and return a fresh ``OracleConnection``."""
+        # Using python-oracledb (the modern successor to cx_Oracle)
+        try:
+            import oracledb
+        except ImportError:
+            raise ImportError(
+                "The 'oracledb' library is required to use the Oracle backend. "
+                "Install it with 'pip install oracledb'."
+            )
+
+        host = config.get("HOST", "localhost")
+        port = config.get("PORT", 1521)
+        name = config.get("NAME")
+        dsn = f"{host}:{port}/{name}"
+
+        conn = oracledb.connect(
+            user=config.get("USER"),
+            password=config.get("PASSWORD"),
+            dsn=dsn,
+            **config.get("OPTIONS", {}),
+        )
+        return OracleConnection(conn)
 
 class OracleConnection(BaseConnection):
-    """Oracle connection wrapper with secure parameterized queries.
+    """Oracle connection wrapper with secure parameterized queries."""
     
-    This is a placeholder implementation. Oracle support requires
-    the cx_Oracle package.
-    """
-
-    @property
-    def param_placeholder(self) -> str:
-        return ":param"
+    #: Oracle requires FROM DUAL for simple constant selects
+    validation_query: str = "SELECT 1 FROM DUAL"
+    
+    #: Oracle uses :1, :2 etc for positional parameters
+    param_placeholder: str = ":1"
 
     def __init__(self, conn: Any) -> None:
         self._conn = conn
 
     def execute(self, sql: str, params: Iterable[Any] | None = None) -> Any:
+        """Execute SQL with parameterized query."""
         cursor = self._conn.cursor()
-        cursor.execute(sql, params or {})
+        cursor.execute(sql, params or ())
         return cursor
 
-    def fetchall(self, sql: str, params: Iterable[Any] | None = None) -> List[Tuple[Any, ...]]:
-        cursor = self.execute(sql, params)
-        rows = cursor.fetchall()
-        cursor.close()
-        return rows
+    def fetchall(self, sql: str, params: Iterable[Any] | None = None) -> list[tuple[Any, ...]]:
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params or ())
+        return cursor.fetchall()
 
-    def fetchone(self, sql: str, params: Iterable[Any] | None = None) -> Optional[Tuple[Any, ...]]:
-        cursor = self.execute(sql, params)
-        row = cursor.fetchone()
-        cursor.close()
-        return row
+    def fetchone(self, sql: str, params: Iterable[Any] | None = None) -> tuple[Any, ...] | None:
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params or ())
+        return cursor.fetchone()
 
     def commit(self) -> None:
         self._conn.commit()
@@ -45,48 +68,3 @@ class OracleConnection(BaseConnection):
 
     def close(self) -> None:
         self._conn.close()
-
-
-class OracleAdapter(BaseAdapter):
-    """Oracle adapter for creating connections and pools."""
-
-    def connect(self, config: Dict[str, Any]) -> OracleConnection:
-        try:
-            import cx_Oracle
-        except ImportError as e:
-            raise ImportError(
-                "Oracle backend requires cx_Oracle package. "
-                "Install it with: pip install cx_oracle"
-            ) from e
-
-        dsn = cx_Oracle.makedsn(
-            config.get("HOST", "localhost"),
-            config.get("PORT", 1521),
-            service_name=config.get("NAME"),
-        )
-        
-        conn = cx_Oracle.connect(
-            user=config.get("USER"),
-            password=config.get("PASSWORD"),
-            dsn=dsn,
-        )
-        
-        return OracleConnection(conn)
-
-    def create_pool(self, config: Dict[str, Any], pool_config: Dict[str, Any] | None = None) -> Any:
-        from ...connections.base import SyncConnectionPool
-        pool_config = pool_config or {}
-        return SyncConnectionPool(
-            self,
-            config,
-            min_size=pool_config.get("min_size", 1),
-            max_size=pool_config.get("max_size", 5),
-            timeout=pool_config.get("timeout", 30),
-        )
-
-    def quote_name(self, name: str) -> str:
-        """Quote a database identifier."""
-        return f'"{name}"'
-
-
-__all__ = ["OracleConnection", "OracleAdapter"]

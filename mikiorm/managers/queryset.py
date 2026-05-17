@@ -11,7 +11,7 @@ from ..conf.settings import settings, connection_manager
 from ..models.base import Model, ObjectDoesNotExist, MultipleObjectsReturned
 from ..models.relationships import ForeignKey
 from ..query.builder import QueryBuilder
-from ..query.safe_builder import get_safe_builder
+from ..backends.base.dialect import get_safe_builder
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,6 @@ class QuerySet:
 
     def _build_where_clause(self, connection: Any = None) -> tuple[str, list[Any]]:
         """Build WHERE clause with safe identifier quoting and parameterization."""
-        conn = connection or self._get_connection()
         # Get engine from settings to select the right dialect
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
@@ -133,6 +132,8 @@ class QuerySet:
         conn = connection or self._get_connection()
         sql, qparams = self._build_sql()
         rows = conn.fetchall(sql, qparams)
+        if connection is None and hasattr(conn, 'close'):
+            conn.close()
         return [self._row_to_model(row) for row in rows]
 
     def first(self, connection: Any = None) -> Model | None:
@@ -155,6 +156,8 @@ class QuerySet:
 
         sql = f"SELECT COUNT(*) FROM {quoted_table}{where}"
         row = conn.fetchone(sql, params)
+        if connection is None and hasattr(conn, 'close'):
+            conn.close()
         return row[0] if row else 0
 
     def exists(self, connection: Any = None) -> bool:
@@ -252,6 +255,8 @@ class QuerySet:
         conn.commit()
         rowcount = cursor.rowcount if hasattr(cursor, "rowcount") else 0
         logger.info(f"Deleted {rowcount} {self.model.__name__} rows")
+        if connection is None and hasattr(conn, 'close'):
+            conn.close()
         return rowcount
 
     def update(self, connection: Any = None, **values: Any) -> int:
@@ -287,6 +292,8 @@ class QuerySet:
         conn.commit()
         rowcount = cursor.rowcount if hasattr(cursor, "rowcount") else 0
         logger.info(f"Updated {rowcount} {self.model.__name__} rows with {values}")
+        if hasattr(conn, 'close'):
+            conn.close()
         return rowcount
 
     def values(self, *fields: str) -> list[dict[str, Any]]:
@@ -314,6 +321,8 @@ class QuerySet:
                 result.append({k: row[k] for k in fields if k in row})
             else:
                 result.append(dict(zip(fields, row)))
+        if hasattr(conn, 'close'):
+            conn.close()
         return result
 
     def values_list(
@@ -351,6 +360,8 @@ class QuerySet:
                     result.append(tuple(row.get(f) for f in fields))
                 else:
                     result.append(tuple(row))
+        if hasattr(conn, 'close'):
+            conn.close()
         return result
 
     def __iter__(self) -> Iterable[Model]:
