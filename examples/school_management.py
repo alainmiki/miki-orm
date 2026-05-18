@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import makemigrations, migrate, models
+from mikiorm import makemigrations, migrate, models, register
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "school.db")
 
@@ -41,6 +41,7 @@ def configure():
 # Model definitions
 # ---------------------------------------------------------------------------
 
+@register
 class Student(models.Model):
     """A student enrolled in the school."""
     admission_number = models.CharField(max_length=20, unique=True)
@@ -62,6 +63,7 @@ class Student(models.Model):
         return f"<Student {self.admission_number}: {self.first_name} {self.last_name}>"
 
 
+@register
 class Teacher(models.Model):
     """A teacher at the school."""
     employee_id = models.CharField(max_length=20, unique=True)
@@ -81,6 +83,7 @@ class Teacher(models.Model):
         return f"<Teacher {self.employee_id}: {self.first_name} {self.last_name}>"
 
 
+@register
 class Course(models.Model):
     """An academic course taught by a teacher."""
     code = models.CharField(max_length=20, unique=True)
@@ -100,6 +103,7 @@ class Course(models.Model):
         return f"<Course {self.code}: {self.name}>"
 
 
+@register
 class Enrollment(models.Model):
     """Student enrollment in a course with grade tracking."""
     student = models.ForeignKey(to="Student", on_delete=models.CASCADE)
@@ -113,6 +117,7 @@ class Enrollment(models.Model):
         table_name = "enrollments"
 
 
+@register
 class Attendance(models.Model):
     """Daily attendance record for a student in a course."""
     student = models.ForeignKey(to="Student", on_delete=models.CASCADE)
@@ -141,7 +146,7 @@ def run():
     print("=" * 60)
 
     # Generate and apply all table-creation migrations through the standard flow
-    makemigrations([Student, Teacher, Course, Enrollment, Attendance])
+    makemigrations()
     migrate()
     print("  [OK] Database schema initialized via migrations.")
 

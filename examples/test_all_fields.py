@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import makemigrations, migrate, models
+from mikiorm import makemigrations, migrate, models, register
 from mikiorm.settings import connection_manager
 from datetime import datetime, date, time, timedelta
 from decimal import Decimal

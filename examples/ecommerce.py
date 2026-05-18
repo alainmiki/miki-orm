@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import makemigrations, migrate, models
+from mikiorm import makemigrations, migrate, models, register
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "ecommerce.db")
 
@@ -47,6 +47,7 @@ def configure():
 # Model definitions
 # ---------------------------------------------------------------------------
 
+@register
 class Customer(models.Model):
     """A customer who can place orders."""
     first_name = models.CharField(max_length=50)
@@ -63,6 +64,7 @@ class Customer(models.Model):
         return f"<Customer {self.first_name} {self.last_name}>"
 
 
+@register
 class Address(models.Model):
     """Shipping / billing address linked to a customer (OneToOne)."""
     customer = models.OneToOneField(to="Customer", on_delete=models.CASCADE)
@@ -76,6 +78,7 @@ class Address(models.Model):
         table_name = "addresses"
 
 
+@register
 class Product(models.Model):
     """An item in the store catalog."""
     name = models.CharField(max_length=200)
@@ -93,6 +96,7 @@ class Product(models.Model):
         return f"<Product {self.name} (${self.price})>"
 
 
+@register
 class Order(models.Model):
     """A customer order containing multiple items."""
     STATUS_CHOICES = (
@@ -117,6 +121,7 @@ class Order(models.Model):
         table_name = "orders"
 
 
+@register
 class OrderItem(models.Model):
     """Individual line item within an order."""
     order = models.ForeignKey(to="Order", on_delete=models.CASCADE)
@@ -137,7 +142,7 @@ def run():
     configure()
 
     # Run migrations so tables are created through the migration workflow
-    makemigrations([Customer, Address, Product, Order, OrderItem])
+    makemigrations()
     migrate()
     print("  [OK] Schema initialized via migrations.")
 

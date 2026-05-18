@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import makemigrations, migrate, models
+from mikiorm import makemigrations, migrate, models, register
 from mikiorm.managers.base import Manager
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tasks.db")
@@ -49,6 +49,7 @@ def configure():
 # Model definitions
 # ---------------------------------------------------------------------------
 
+@register
 class Project(models.Model):
     """A project containing tasks."""
     name = models.CharField(max_length=150)
@@ -78,6 +79,7 @@ class TaskManager(Manager):
         return self.filter(project=project)
 
 
+@register
 class Task(models.Model):
     """A task within a project."""
     PRIORITY_CHOICES = (
@@ -126,6 +128,7 @@ class Task(models.Model):
         return f"<Task '{self.title}' [{self.priority}]>"
 
 
+@register
 class TimeLog(models.Model):
     """Track time spent working on a task."""
     task = models.ForeignKey(to="Task", on_delete=models.CASCADE)
@@ -146,7 +149,7 @@ def run():
     configure()
 
     # Run migrations so tables are created through the migration workflow
-    makemigrations([Project, Task, TimeLog])
+    makemigrations()
     migrate()
     print("  [OK] Schema initialized via migrations.")
 

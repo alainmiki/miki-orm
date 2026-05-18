@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import models
+from mikiorm import models, register
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "library.db")
 
@@ -60,6 +60,7 @@ def configure(backend="sqlite"):
 # Model definitions
 # ---------------------------------------------------------------------------
 
+@register
 class Author(models.Model):
     """Book author or co-author."""
     name = models.CharField(max_length=100)
@@ -75,6 +76,7 @@ class Author(models.Model):
         return f"<Author {self.name}>"
 
 
+@register
 class Genre(models.Model):
     """Book genre/category."""
     name = models.CharField(max_length=50, unique=True)
@@ -88,6 +90,7 @@ class Genre(models.Model):
         return f"<Genre {self.name}>"
 
 
+@register
 class Publisher(models.Model):
     """Book publisher."""
     name = models.CharField(max_length=150)
@@ -102,6 +105,7 @@ class Publisher(models.Model):
         return f"<Publisher {self.name}>"
 
 
+@register
 class Book(models.Model):
     """A book with multiple authors and genres."""
     title = models.CharField(max_length=300)
@@ -123,6 +127,7 @@ class Book(models.Model):
         return f"<Book '{self.title}'>"
 
 
+@register
 class Member(models.Model):
     """Library member who can borrow books."""
     name = models.CharField(max_length=100)
@@ -138,6 +143,7 @@ class Member(models.Model):
         return f"<Member {self.name}>"
 
 
+@register
 class BorrowRecord(models.Model):
     """Through model for Member <-> Book borrowing relationship."""
     member = models.ForeignKey(to="Member", on_delete=models.CASCADE)
@@ -162,7 +168,7 @@ def run(backend="sqlite"):
 
     # Create tables via migration API
     print(f"--- Setting up {backend} database ---")
-    mikiorm.makemigrations([Author, Genre, Publisher, Book, Member, BorrowRecord])
+    mikiorm.makemigrations()
     mikiorm.migrate()
     print("  [OK] Database schema initialized.")
 

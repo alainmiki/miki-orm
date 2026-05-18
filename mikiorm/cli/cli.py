@@ -220,13 +220,16 @@ def main():
         elif args.command == "check":
             logger.info("Performing system checks...")
 
-            # 1. Verify App Registry and Models
+            # 1. Verify Model Registry
             from mikiorm.settings import settings
-            logger.info(f"  Checking registered apps: {settings.installed_apps}")
+
+            # Explicitly trigger model discovery to ensure registry is populated
+            engine = MigrationEngine()
+            engine.discover_models()
 
             models = ModelRegistry.all_models()
             if not models:
-                logger.warning("  [WARN] No models found in the registry. Check INSTALLED_APPS and imports.")
+                logger.warning("  [WARN] No models found in the registry. Ensure modules calling @register are imported or listed in MODEL_PATHS.")
             else:
                 logger.info(f"  [OK] {len(models)} model(s) registered.")
 
@@ -234,7 +237,6 @@ def main():
             if connection_manager.validate_connection():
                 logger.info("  [OK] Database settings and connection validated.")
 
-                engine = MigrationEngine()
                 with connection_manager.get_connection() as conn:
                     # 2. Check for unapplied migration files
                     unapplied = engine.get_unapplied_migrations(conn)
@@ -445,6 +447,11 @@ def main():
 
             # Prepare namespace with mikiorm and all registered models
             namespace = {"mikiorm": mikiorm}
+
+            # Discover models so they are available in the shell
+            engine = MigrationEngine()
+            engine.discover_models()
+
             models = ModelRegistry.all_models()
             for model_cls in models:
                 namespace[model_cls.__name__] = model_cls

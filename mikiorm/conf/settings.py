@@ -455,25 +455,13 @@ class Settings:
     def __init__(self) -> None:
         self.databases: Dict[str, DatabaseConfig] = {}
         self.default_database: str = "default"
-        self.installed_apps: list[str] = []
         self.migration_path: str = "migrations"
+        self.model_paths: list[str] = []
         self.logging: Dict[str, Any] = {}
 
     def configure_databases(self, databases: Dict[str, Dict[str, Any]]) -> None:
         for alias, config in databases.items():
             self.databases[alias] = DatabaseConfig(config)
-
-    def install_app(self, app_name: str) -> None:
-        if app_name in self.installed_apps:
-            return
-        importlib.import_module(app_name)
-        self.installed_apps.append(app_name)
-        # Pull in the conventional ``app.models`` module if present so model
-        # classes register themselves with the ORM registry.
-        try:
-            importlib.import_module(f"{app_name}.models")
-        except ModuleNotFoundError:
-            pass
 
     def get_database(self, name: Optional[str] = None) -> DatabaseConfig:
         alias = name or self.default_database
@@ -494,9 +482,9 @@ async_connection_manager = AsyncConnectionManager()
 def configure(
     databases: Dict[str, Dict[str, Any]] | None = None,
     *,
-    installed_apps: Optional[list[str]] = None,
     migration_path: Optional[str] = None,
     default_database: Optional[str] = None,
+    model_paths: Optional[list[str]] = None,
     logging_config: Optional[Dict[str, Any]] = None,
 ) -> None:
     """One-shot configuration entry point used by application code.
@@ -520,11 +508,10 @@ def configure(
         settings.default_database = default_database
     if migration_path is not None:
         settings.migration_path = migration_path
+    if model_paths is not None:
+        settings.model_paths = model_paths
     if logging_config is not None:
         settings.logging.update(logging_config)
-    if installed_apps:
-        for app in installed_apps:
-            settings.install_app(app)
 
 
 __all__ = [

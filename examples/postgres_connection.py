@@ -24,9 +24,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import makemigrations, migrate, models
+from mikiorm import models
 from mikiorm.settings import settings, connection_manager
-from mikiorm.migrations.engine import MigrationEngine
+# from mikiorm.migrations.engine import MigrationEngine # No longer needed directly here
 from mikiorm.backends.postgresql import PostgresAdapter
 
 
@@ -40,15 +40,18 @@ def configure(backend="postgres"):
     os.makedirs(migrations_dir, exist_ok=True)
 
     if backend == "postgres":
-        mikiorm.configure({
-            "default": {
-                "ENGINE": "postgresql",
-                "NAME": "test",
-                "USER": "postgres",
-                "PASSWORD": "admin",
-                "HOST": "localhost", "PORT": 5432, "OPTIONS": {"sslmode": "prefer"},
-            }
-        })
+        mikiorm.configure(
+            databases={
+                "default": {
+                    "ENGINE": "postgresql",
+                    "NAME": "test",
+                    "USER": "postgres",
+                    "PASSWORD": "admin",
+                    "HOST": "localhost", "PORT": 5432, "OPTIONS": {"sslmode": "prefer"},
+                }
+            },
+            model_paths=[os.path.dirname(__file__)]
+        )
     else:
         mikiorm.configure({
             "default": {
@@ -120,10 +123,10 @@ def run_crud(backend):
     """Run a full round of CRUD operations."""
     print(f"\n--- Running CRUD Operations on {backend} ---")
 
-    # Use standard migration flow: reflect models → write migration file → apply
+    # Use MigrationEngine directly as per updated cli/init
     from mikiorm.migrations.engine import MigrationEngine
-    makemigrations([Product, Review])
-    migrate()
+    MigrationEngine().makemigrations([Product, Review])
+    MigrationEngine().migrate()
     print("  [OK] Tables created via migrate()")
 
     # ---- CREATE ----
@@ -218,12 +221,13 @@ def run_crud(backend):
 
 
 def cleanup(conn):
-    """Roll back migration history but leave the DB intact."""
+    """Drop test tables to leave a clean state."""
     print("\n--- Cleanup ---")
     try:
-        engine = MigrationEngine()
-        engine.rollback(connection=conn, steps=999)
-        print("  [OK] Rolled back all migrations")
+        conn.execute('DROP TABLE IF EXISTS "reviews"')
+        conn.execute('DROP TABLE IF EXISTS "products"')
+        conn.commit()
+        print("  [OK] Dropped test tables")
     except Exception as e:
         print("  [WARN] Cleanup warning: %s" % e)
 

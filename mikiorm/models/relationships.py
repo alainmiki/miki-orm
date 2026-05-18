@@ -179,3 +179,47 @@ class ReverseOneToOneDescriptor(ReverseForeignKeyDescriptor):
             return self.source_model.objects.get(**{self.field.name: instance.pk})
         except ObjectDoesNotExist:
             return None
+
+
+class ForwardForeignKeyDescriptor:
+    """Descriptor for forward ForeignKey/OneToOne access.
+
+    When accessed on an instance, returns the related model instance (or None).
+    Accepts either an instance or a PK when assigned.
+    """
+
+    def __init__(self, field: ForeignKey) -> None:
+        self.field = field
+
+    def __get__(self, instance: Any, owner: Any) -> Any:
+        if instance is None:
+            return self
+        value = instance.__dict__.get(self.field.name)
+        if value is None:
+            return None
+        if hasattr(value, "pk"):
+            return value
+        related_model = self._resolve_related_model()
+        try:
+            return related_model.objects.get(pk=value)
+        except Exception:
+            return None
+
+    def __set__(self, instance: Any, value: Any) -> None:
+        if value is None:
+            instance.__dict__[self.field.name] = None
+            return
+        if hasattr(value, "pk"):
+            instance.__dict__[self.field.name] = value.pk
+        else:
+            instance.__dict__[self.field.name] = value
+
+    def _resolve_related_model(self) -> type[Any]:
+        target = self.field.to
+        if isinstance(target, str):
+            from ..models.registry import ModelRegistry
+            model = ModelRegistry.get_model(target)
+            if model is None:
+                raise LookupError(f"Related model '{target}' not registered")
+            return model
+        return target

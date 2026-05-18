@@ -12,6 +12,8 @@ always read and study the django db folder to understand what this orm is all ab
 - django backends link: https://github.com/django/django/tree/main/django/db/backends
 - in real world use cases and example and how the orm should work all models most be registered to be found during makemigrations and migrate. migrations most be generated before migrated with migrate command before any table/field/columns changes is created,updated or altered.
 - the orm should be be db backend aware . pools logic should be execute fast without hanging same with migrations and commands
+- all table/field/columns creation,alter or drop should use the migration flow only no direct stuff
+- users should user the models register function/decorator to register models
 
 
 

@@ -1,5 +1,5 @@
 # mikiorm/__init__.py
-from .models import Model
+from .models import Model, register
 from .managers import Manager as BaseManager
 from .backends import Postgres,SQLite,MySQL
 from .conf.settings import configure, settings
@@ -23,6 +23,7 @@ def migrate(connection=None, target=None):
 
 __all__ = [
     "Model",
+    "register",
     "BaseManager",
     "Postgres",
     "SQLite",

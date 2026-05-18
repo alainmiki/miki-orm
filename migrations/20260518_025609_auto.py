@@ -1,5 +1,5 @@
 # Auto-generated migration
-# Generated: 2026-05-18T00:31:40.284344
+# Generated: 2026-05-18T02:56:09.351674
 
 from mikiorm.migrations import operations
 from mikiorm.models.fields import AutoField

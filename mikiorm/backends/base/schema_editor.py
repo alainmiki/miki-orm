@@ -372,8 +372,8 @@ class SchemaEditor:
         # DEFAULT.
         default = getattr(field, "default", None)
         if default is not None and not callable(default) and not is_auto_pk:
-            if for_alter and self.dialect == Dialect.SQLITE:
-                # SQLite ALTER TABLE ADD COLUMN demands a literal default.
+            if for_alter or self.dialect == Dialect.SQLITE:
+                # SQLite requires literal defaults in CREATE TABLE and ALTER TABLE.
                 parts.append(f"DEFAULT {_safe_default_literal(default)}")
             else:
                 ph = self.builder.param_placeholder

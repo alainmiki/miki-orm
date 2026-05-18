@@ -41,14 +41,7 @@ class ModelMeta(type):
         meta_attrs = {}
         meta_cls = namespace.get("Meta")
         if meta_cls is not None:
-            for attr in (
-                "table_name",
-                "indexes",
-                "constraints",
-                "ordering",
-                "abstract",
-                "managed",
-            ):
+            for attr in ("table_name", "app_label", "indexes", "constraints", "ordering", "abstract", "managed"):
                 if hasattr(meta_cls, attr):
                     meta_attrs[attr] = getattr(meta_cls, attr)
 
@@ -160,29 +153,66 @@ class ModelMeta(type):
                     )
                     setattr(target_cls, field.related_name, descriptor)
 
+            # Install forward descriptors for ForeignKey/OneToOneField so that
+            # attribute access returns the related instance instead of the raw PK.
+            from .relationships import ForwardForeignKeyDescriptor
+
+            for fname, field in fields.items():
+                if isinstance(field, (ForeignKey, OneToOneField)):
+                    setattr(cls, fname, ForwardForeignKeyDescriptor(field))
+
+        return cls
+
         return cls
 
 
-def register(*models: type[Model]) -> type[Model] | None:
+def register(*models: type[Model], app_label: str | None = None) -> Any:
     """
     Universal standard way to register models. 
     Can be used as a decorator or a function call.
     
     This ensures models in any folder are discovered for migrations 
-    as long as the file is imported once.
+    as long as the file is imported once or the folder is listed in MODEL_PATHS.
 
     Usage:
         @register
         class User(Model): ...
         
+        @register(app_label="catalog")
+        class Product(Model): ...
+
         register(OtherModel, AnotherModel)
     """
-    for model in models:
+    def _register_single(model: type[Model]) -> type[Model]:
+        # Determine app_label if not explicitly set in Meta
+        if hasattr(model, "_meta"):
+            # Priority: explicit argument > Meta attribute > module inference
+            if app_label is not None:
+                model._meta.app_label = app_label
+
+            if model._meta.app_label is None:
+                module_name = model.__module__
+                if ".models" in module_name:
+                    # Extract app name from 'app.models.module'
+                    inferred_label = module_name.split(".models")[0].split(".")[-1]
+                else:
+                    # Fallback to the top-level package name or module name
+                    inferred_label = module_name.split(".")[0]
+                model._meta.app_label = inferred_label
+
         ModelRegistry.register_model(model)
+        return model
+
+    if not models:
+        # Used as @register(app_label="...")
+        return _register_single
+
+    for model in models:
+        _register_single(model)
+
     if len(models) == 1:
         return models[0]
     return None
-
 
 class Model(metaclass=ModelMeta):
     """Base model class with ORM-like behaviour."""

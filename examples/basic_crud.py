@@ -20,8 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
 from mikiorm import makemigrations, migrate, models
-
+from mikiorm.models import register
 DB_PATH = os.path.join(os.path.dirname(__file__), "blog.db")
+
 
 
 def cleanup():
@@ -34,18 +35,23 @@ def cleanup():
 
 
 def configure():
-    mikiorm.configure({
-        "default": {
-            "ENGINE": "sqlite",
-            "NAME": DB_PATH,
-        }
-    })
+    mikiorm.configure(
+        databases={
+            "default": {
+                "ENGINE": "sqlite",
+                "NAME": DB_PATH,
+            }
+        },
+        # Tell the engine where to look for models to track changes
+        model_paths=[os.path.dirname(__file__)],
+    )
 
 
 # ---------------------------------------------------------------------------
 # Model definitions
 # ---------------------------------------------------------------------------
 
+@register(app_label="blog")
 class Author(models.Model):
     """Represents a blog author."""
     name = models.CharField(max_length=100)
@@ -59,6 +65,7 @@ class Author(models.Model):
         ordering = ["name"]
 
 
+@register
 class Category(models.Model):
     """Blog post categories (e.g. 'Technology', 'Lifestyle')."""
     name = models.CharField(max_length=50)
@@ -69,6 +76,7 @@ class Category(models.Model):
         table_name = "categories"
 
 
+@register
 class Post(models.Model):
     """A blog post with rich field types."""
     title = models.CharField(max_length=200)
@@ -95,8 +103,13 @@ def run():
     cleanup()
     configure()
 
+    # Prevent discover_models from importing other example files that define
+    # models with overlapping names (e.g., Author). We only want this script's models.
+    from mikiorm.conf.settings import settings as miki_settings
+    miki_settings.model_paths = []
+
     # Run migrations so tables are created through the migration workflow
-    makemigrations([Author, Category, Post])
+    makemigrations()
     migrate()
     print("  [OK] Schema initialized via migrations.")
 

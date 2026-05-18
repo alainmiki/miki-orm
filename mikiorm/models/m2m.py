@@ -319,6 +319,19 @@ class ManyToManyManager:
 # Reverse manager: used on the related_name side
 # ---------------------------------------------------------------------------
 
+class ReverseManyToManyDescriptor:
+    """Data descriptor that returns a ReverseManyToManyManager on instance access."""
+
+    def __init__(self, field: Any, source_model: type[Any]) -> None:
+        self.field = field
+        self.source_model = source_model
+
+    def __get__(self, instance: Any, owner: Any) -> Any:
+        if instance is None:
+            return self
+        return ReverseManyToManyManager(instance, self.field, self.source_model)
+
+
 class ReverseManyToManyManager:
     """Manager for reverse side of ManyToMany (via related_name)."""
 

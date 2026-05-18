@@ -22,7 +22,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mikiorm
-from mikiorm import makemigrations, migrate, models
+from mikiorm import makemigrations, migrate, models, register
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "social.db")
 
@@ -65,6 +65,7 @@ def configure(backend="sqlite"):
 # Model definitions
 # ---------------------------------------------------------------------------
 
+@register
 class User(models.Model):
     """Social media user profile."""
     username = models.CharField(max_length=50, unique=True)
@@ -84,6 +85,7 @@ class User(models.Model):
         return f"<User @{self.username}>"
 
 
+@register
 class Follow(models.Model):
     """User follows another user (self-referential FK)."""
     follower = models.ForeignKey(to="User", on_delete=models.CASCADE, related_name="following")
@@ -94,6 +96,7 @@ class Follow(models.Model):
         table_name = "follows"
 
 
+@register
 class Post(models.Model):
     """A social media post."""
     author = models.ForeignKey(to="User", on_delete=models.CASCADE)
@@ -113,6 +116,7 @@ class Post(models.Model):
         return f"<Post by @{self.author.username}: {self.content[:40]}...>"
 
 
+@register
 class Comment(models.Model):
     """Comment on a post, supports nesting via parent reference."""
     post = models.ForeignKey(to="Post", on_delete=models.CASCADE)
@@ -126,6 +130,7 @@ class Comment(models.Model):
         table_name = "comments"
 
 
+@register
 class Like(models.Model):
     """Like on a post (could be extended to comments)."""
     user = models.ForeignKey(to="User", on_delete=models.CASCADE)
@@ -137,6 +142,7 @@ class Like(models.Model):
         table_name = "likes"
 
 
+@register
 class Message(models.Model):
     """Direct message between users."""
     sender = models.ForeignKey(to="User", on_delete=models.CASCADE, related_name="sent_messages")
@@ -160,7 +166,7 @@ def run(backend="sqlite"):
     configure(backend)
 
     # Initialize schema via migration workflow
-    makemigrations([User, Follow, Post, Comment, Like, Message])
+    makemigrations()
     migrate()
     print("  [OK] Schema initialized via migrations.")
 

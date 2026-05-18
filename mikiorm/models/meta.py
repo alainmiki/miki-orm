@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional
 @dataclass
 class MetaOptions:
     table_name: str | None = None
+    app_label: str | None = None
     indexes: List[Dict[str, Any]] = field(default_factory=list)
     constraints: List[Dict[str, Any]] = field(default_factory=list)
     ordering: List[str] = field(default_factory=list)
