@@ -1,4 +1,4 @@
-"""Migration runner and management utilities - complete implementation."""
+"""Migration runner and management utilities - production-ready implementation."""
 
 from __future__ import annotations
 
@@ -9,16 +9,18 @@ import os
 import sys
 import logging
 import shutil
+import uuid
 from datetime import datetime
 from typing import Any, Callable
+from functools import wraps
 
 from . import operations
 from .operations import MigrationOperation
 from .history import MigrationHistory
-
 from .diff import generate_migration_operations
-from .editor import CollectingSchemaEditor  # Import the new editor
-from .schema import get_introspector
+from .editor import CollectingSchemaEditor
+from .validation import MigrationFileValidator, MigrationPathValidator
+from .retry import retry_with_backoff, RetryConfig, is_transient_error
 from mikiorm.backends.base.dialect import Dialect
 from mikiorm.backends.base.schema_editor import field_to_sql_type, _safe_default_literal
 
@@ -26,14 +28,15 @@ logger = logging.getLogger(__name__)
 
 
 class MigrationEngine:
-    """Engine for generating and applying migrations."""
+    """Engine for generating and applying migrations with production safety."""
 
     def __init__(self, migrations_path: str | None = None) -> None:
         from ..conf.settings import settings
+
         self.migrations_path = migrations_path or settings.migration_path
         self._discovered = False
+        self.retry_config = RetryConfig(max_retries=3)
 
-    def _ensure_migrations_table(self, connection: Any) -> None:
     def _ensure_migrations_table(self, connection: Any, target: str = "default") -> None:
         """Ensure the migrations tracking table exists."""
         from ..backends.base.dialect import get_safe_builder
@@ -46,35 +49,42 @@ class MigrationEngine:
         quoted_table = builder.quote_table("_mikiorm_migrations")
 
         if db_config.engine == "postgresql":
-            sql = f"CREATE TABLE IF NOT EXISTS {quoted_table} (id SERIAL PRIMARY KEY, name VARCHAR(255) UNIQUE NOT NULL, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            sql = f"""CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) UNIQUE NOT NULL,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(20) DEFAULT 'applied' CHECK (status IN ('applied', 'rolled_back'))
+            )"""
         else:
             # SQLite / MySQL
             auto_inc = (
                 "AUTOINCREMENT" if db_config.engine == "sqlite" else "AUTO_INCREMENT"
             )
-            sql = f"CREATE TABLE IF NOT EXISTS {quoted_table} (id INTEGER PRIMARY KEY {auto_inc}, name VARCHAR(255) UNIQUE NOT NULL, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+            sql = f"""CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id INTEGER PRIMARY KEY {auto_inc},
+                name VARCHAR(255) UNIQUE NOT NULL,
+                applied_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(20) DEFAULT 'applied' CHECK (status IN ('applied', 'rolled_back'))
+            )"""
 
         connection.execute(sql, ())
 
-    def get_applied_migrations(self, connection: Any) -> list[str]:
     def get_applied_migrations(self, connection: Any, target: str = "default") -> list[str]:
         """Return a list of applied migration names from the database."""
         from ..backends.base.dialect import get_safe_builder
         from ..settings import settings
 
-        db_config = settings.get_database("default")
         db_config = settings.get_database(target)
         builder = get_safe_builder(db_config.engine)
 
         quoted_table = builder.quote_table("_mikiorm_migrations")
-        sql = f"SELECT name FROM {quoted_table} ORDER BY id ASC"
-        sql = f"SELECT name FROM {quoted_table} ORDER BY applied_at ASC, id ASC"
+        sql = f"SELECT name FROM {quoted_table} WHERE status = 'applied' ORDER BY applied_at ASC, id ASC"
         rows = connection.fetchall(sql, ())
         return [row[0] for row in rows]
 
-    def get_unapplied_migrations(self, connection: Any) -> list[str]:
+    def get_unapplied_migrations(self, connection: Any, target: str = "default") -> list[str]:
         """Return a list of migration files that exist on disk but are not in the DB."""
-        applied = self.get_applied_migrations(connection)
+        applied = self.get_applied_migrations(connection, target)
         history = MigrationHistory.load_history(self.migrations_path)
         return [m for m in history if m not in applied]
 
