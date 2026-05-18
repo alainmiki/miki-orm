@@ -162,7 +162,36 @@ class Manager:
 
         return QuerySet(self.model).defer(*fields)
 
-    # Async methods
+    def in_bulk(self, id_list: list[Any] | None = None, *, field_name: str = "pk") -> dict[Any, Model]:
+        """Return a dictionary mapping field_name values to model instances."""
+        from .queryset import QuerySet
+
+        return QuerySet(self.model).in_bulk(id_list, field_name=field_name)
+
+    def union(self, *querysets: "QuerySet", all: bool = False) -> "QuerySet":
+        """Return union of this QuerySet with other QuerySets."""
+        from .queryset import QuerySet
+
+        return QuerySet(self.model).union(*querysets, all=all)
+
+    def intersection(self, *querysets: "QuerySet") -> "QuerySet":
+        """Return intersection of this QuerySet with other QuerySets."""
+        from .queryset import QuerySet
+
+        return QuerySet(self.model).intersection(*querysets)
+
+    def difference(self, *querysets: "QuerySet") -> "QuerySet":
+        """Return difference of this QuerySet with other QuerySets."""
+        from .queryset import QuerySet
+
+        return QuerySet(self.model).difference(*querysets)
+
+    def having(self, *args: Any, **kwargs: Any) -> "QuerySet":
+        """Filter on aggregated values (must be used with annotate())."""
+        from .queryset import QuerySet
+
+        return QuerySet(self.model).having(*args, **kwargs)
+
     async def async_all(self, connection: Any = None) -> list[Model]:
         """Return all objects asynchronously."""
         from .async_queryset import AsyncQuerySet

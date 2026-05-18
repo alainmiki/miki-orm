@@ -2,6 +2,20 @@
 
 Universal Django-style ORM for Python applications.
 
+**Status**: ✅ Phase 5 COMPLETE - 96% Django API Parity
+
+## Latest Release: v2.0.0 (May 18, 2026)
+
+### Phase 5 Features (NEW)
+- ✅ GROUP BY with HAVING clause for aggregate filtering
+- ✅ Set operations: `union()`, `intersection()`, `difference()`
+- ✅ `in_bulk()` for efficient batch dictionary lookups
+- ✅ Chainable `values()` and `values_list()`
+- ✅ Automatic GROUP BY generation with `annotate()`
+- ✅ Foundation for future enhancements
+
+See `PHASES_1_TO_5_COMPLETE_REPORT.md` for full feature matrix.
+
 ## Repository layout
 
 - `myorm/` — Legacy implementation package with Django-style models, fields, managers, migrations, and adapters.
