@@ -33,6 +33,8 @@ class QuerySet:
         self._group_by: list[str] = []
         self._only_fields: set[str] | None = None
         self._defer_fields: set[str] = set()
+        self._having_conditions: list[Any] = []
+        self._set_operation: tuple[str, "QuerySet"] | None = None
 
     def _get_connection(self) -> Any:
         from ..conf.settings import connection_manager
@@ -57,6 +59,8 @@ class QuerySet:
         clone._group_by = self._group_by.copy()
         clone._only_fields = self._only_fields.copy() if self._only_fields else None
         clone._defer_fields = self._defer_fields.copy()
+        clone._having_conditions = self._having_conditions.copy()
+        clone._set_operation = self._set_operation
         return clone
 
     def _resolve_lookup(self, field_name: str, value: Any) -> tuple[str, Any]:
@@ -587,6 +591,127 @@ class QuerySet:
         if hasattr(conn, 'close'):
             conn.close()
         return result
+
+    def in_bulk(self, id_list: list[Any] | None = None, *, field_name: str = "pk") -> dict[Any, Model]:
+        """Return a dictionary mapping field_name values to model instances.
+        
+        Usage:
+            Author.objects.in_bulk([1, 2, 3]) -> {1: Author(...), 2: Author(...), 3: Author(...)}
+            Author.objects.in_bulk([1, 2], field_name='id')
+        """
+        if id_list is None:
+            id_list = []
+        
+        # Get by primary key or specified field
+        if field_name == "pk":
+            field_name = next(
+                (
+                    name
+                    for name, fld in self.model._meta.fields.items()
+                    if fld.primary_key
+                ),
+                "id",
+            )
+        
+        if id_list:
+            filtered = self.filter(**{f"{field_name}__in": id_list})
+        else:
+            filtered = self
+        
+        results = filtered.all()
+        bulk_dict = {}
+        for obj in results:
+            key = getattr(obj, field_name)
+            bulk_dict[key] = obj
+        
+        return bulk_dict
+
+    def union(self, *querysets: "QuerySet", all: bool = False) -> "QuerySet":
+        """Return union of this QuerySet with other QuerySets.
+        
+        Usage:
+            Author.objects.filter(age__gte=25).union(Author.objects.filter(status="active"))
+        """
+        clone = self._clone()
+        for qs in querysets:
+            if not isinstance(qs, QuerySet) or qs.model != self.model:
+                raise TypeError("union() requires QuerySets of the same model")
+        
+        if querysets:
+            clone._set_operation = ("UNION" if not all else "UNION ALL", querysets[0])
+            if len(querysets) > 1:
+                # Chain multiple unions
+                result = clone
+                for qs in querysets[1:]:
+                    result = result.union(qs, all=all)
+                return result
+        
+        return clone
+
+    def intersection(self, *querysets: "QuerySet") -> "QuerySet":
+        """Return intersection of this QuerySet with other QuerySets.
+        
+        Usage:
+            Author.objects.filter(age__gte=25).intersection(Author.objects.filter(status="active"))
+        """
+        clone = self._clone()
+        for qs in querysets:
+            if not isinstance(qs, QuerySet) or qs.model != self.model:
+                raise TypeError("intersection() requires QuerySets of the same model")
+        
+        if querysets:
+            clone._set_operation = ("INTERSECT", querysets[0])
+            if len(querysets) > 1:
+                result = clone
+                for qs in querysets[1:]:
+                    result = result.intersection(qs)
+                return result
+        
+        return clone
+
+    def difference(self, *querysets: "QuerySet") -> "QuerySet":
+        """Return difference of this QuerySet with other QuerySets.
+        
+        Usage:
+            Author.objects.filter(age__gte=25).difference(Author.objects.filter(status="inactive"))
+        """
+        clone = self._clone()
+        for qs in querysets:
+            if not isinstance(qs, QuerySet) or qs.model != self.model:
+                raise TypeError("difference() requires QuerySets of the same model")
+        
+        if querysets:
+            clone._set_operation = ("EXCEPT", querysets[0])
+            if len(querysets) > 1:
+                result = clone
+                for qs in querysets[1:]:
+                    result = result.difference(qs)
+                return result
+        
+        return clone
+
+    def having(self, *args: Any, **kwargs: Any) -> "QuerySet":
+        """Filter on aggregated values (must be used with annotate()).
+        
+        Usage:
+            Product.objects.annotate(total_sales=Sum("sales")).having(total_sales__gte=1000)
+        """
+        if not self._annotations:
+            raise ValueError("having() requires annotate() to be called first")
+        
+        from ..query.expressions import Q
+        clone = self._clone()
+        
+        for arg in args:
+            if isinstance(arg, Q):
+                clone._having_conditions.append(("Q", arg))
+            else:
+                raise TypeError(f"having() takes Q objects or keyword arguments, not {type(arg)}")
+        
+        if kwargs:
+            clone._having_conditions.append(("AND", kwargs))
+        
+        return clone
 
     def __iter__(self) -> Iterable[Model]:
         return iter(self.all())

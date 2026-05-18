@@ -36,6 +36,38 @@ class QueryBuilder:
             sql += where
             params.extend(where_params)
 
+        # Build GROUP BY clause (with annotations)
+        group_by_clause = ""
+        if queryset._annotations:
+            # Get non-aggregated fields for GROUP BY
+            all_fields = list(self.model._meta.fields.keys())
+            group_by_fields = [f for f in all_fields if f not in queryset._defer_fields]
+            
+            if queryset._only_fields:
+                group_by_fields = [f for f in group_by_fields if f in queryset._only_fields]
+            
+            if group_by_fields:
+                quoted_fields = [self.builder.quote_column(f) for f in group_by_fields]
+                group_by_clause = f" GROUP BY {', '.join(quoted_fields)}"
+                sql += group_by_clause
+
+        # Build HAVING clause (filter on aggregations)
+        if queryset._having_conditions and queryset._annotations:
+            having_conditions = []
+            having_params = []
+            
+            for cond_type, cond_data in queryset._having_conditions:
+                if cond_type == "AND":
+                    for key, value in cond_data.items():
+                        field_name, operator = self.builder.parse_lookup(key)
+                        condition, cond_params = self.builder.build_condition(field_name, operator, value)
+                        having_conditions.append(condition)
+                        having_params.extend(cond_params)
+            
+            if having_conditions:
+                sql += " HAVING " + " AND ".join(having_conditions)
+                params.extend(having_params)
+
         # Build ORDER BY clause
         if queryset._order_by:
             order_clause = self.builder.build_order_by(queryset._order_by)
