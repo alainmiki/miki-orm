@@ -163,8 +163,6 @@ class ModelMeta(type):
 
         return cls
 
-        return cls
-
 
 def register(*models: type[Model], app_label: str | None = None) -> Any:
     """

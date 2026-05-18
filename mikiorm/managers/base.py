@@ -126,6 +126,42 @@ class Manager:
 
         return QuerySet(self.model).prefetch_related(*related)
 
+    def distinct(self, *fields: str) -> "QuerySet":
+        """Return distinct results."""
+        from .queryset import QuerySet
+
+        return QuerySet(self.model).distinct(*fields)
+
+    def none(self) -> "QuerySet":
+        """Return an empty QuerySet."""
+        from .queryset import QuerySet
+
+        return QuerySet(self.model).none()
+
+    def annotate(self, **annotations: Any) -> "QuerySet":
+        """Add computed fields via aggregation."""
+        from .queryset import QuerySet
+
+        return QuerySet(self.model).annotate(**annotations)
+
+    def aggregate(self, **aggregates: Any) -> dict[str, Any]:
+        """Return aggregation result as dictionary."""
+        from .queryset import QuerySet
+
+        return QuerySet(self.model).aggregate(**aggregates)
+
+    def only(self, *fields: str) -> "QuerySet":
+        """Select only specified fields."""
+        from .queryset import QuerySet
+
+        return QuerySet(self.model).only(*fields)
+
+    def defer(self, *fields: str) -> "QuerySet":
+        """Exclude specified fields from selection."""
+        from .queryset import QuerySet
+
+        return QuerySet(self.model).defer(*fields)
+
     # Async methods
     async def async_all(self, connection: Any = None) -> list[Model]:
         """Return all objects asynchronously."""

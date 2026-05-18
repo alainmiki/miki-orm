@@ -25,7 +25,9 @@ class QueryBuilder:
         table = self.model._meta.table_name or self.model.__name__.lower() + "s"
         quoted_table = self.builder.quote_table(table)
 
-        sql = f"SELECT * FROM {quoted_table}"
+        # Build SELECT with DISTINCT
+        select_clause = "SELECT DISTINCT" if queryset._distinct else "SELECT"
+        sql = f"{select_clause} * FROM {quoted_table}"
         params: list[Any] = []
 
         # Build WHERE clause from filters and excludes
@@ -39,6 +41,12 @@ class QueryBuilder:
             order_clause = self.builder.build_order_by(queryset._order_by)
             if order_clause:
                 sql += " " + order_clause
+
+        # Build LIMIT and OFFSET
+        if queryset._limit is not None:
+            sql += f" LIMIT {queryset._limit}"
+        if queryset._offset is not None:
+            sql += f" OFFSET {queryset._offset}"
 
         logger.debug(f"Built query: {sql} with params: {params}")
         return sql, tuple(params)

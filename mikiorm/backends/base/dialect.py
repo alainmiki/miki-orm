@@ -59,6 +59,19 @@ _LOOKUPS = {
     "iendswith": "iendswith",
     "isnull": "isnull",
     "range": "range",
+    # Regex lookups
+    "regex": "regex",
+    "iregex": "iregex",
+    # Date/Time lookups
+    "year": "year",
+    "month": "month",
+    "day": "day",
+    "week": "week",
+    "quarter": "quarter",
+    "hour": "hour",
+    "minute": "minute",
+    "second": "second",
+    "date": "date",
 }
 
 
@@ -174,6 +187,85 @@ class SafeBuilder:
             if not isinstance(value, (list, tuple)) or len(value) != 2:
                 raise ValueError(f"'range' lookup requires a 2-tuple, got {value!r}")
             return f"{quoted_field} BETWEEN {ph} AND {ph}", list(value)
+        if operator == "regex":
+            if self.dialect == Dialect.POSTGRESQL:
+                return f"{quoted_field} ~ {ph}", [value]
+            elif self.dialect == Dialect.MYSQL:
+                return f"{quoted_field} REGEXP {ph}", [value]
+            else:
+                # SQLite doesn't have native regex, fall back to LIKE
+                raise NotImplementedError("REGEX lookups not supported on SQLite. Use contains/startswith instead.")
+        if operator == "iregex":
+            if self.dialect == Dialect.POSTGRESQL:
+                return f"{quoted_field} ~* {ph}", [value]  # case-insensitive
+            elif self.dialect == Dialect.MYSQL:
+                return f"{quoted_field} REGEXP {ph}", [value]  # MySQL is case-insensitive by default
+            else:
+                raise NotImplementedError("IREGEX lookups not supported on SQLite.")
+        # Date/time lookups
+        if operator == "year":
+            if self.dialect == Dialect.POSTGRESQL:
+                return f"EXTRACT(YEAR FROM {quoted_field}) = {ph}", [value]
+            elif self.dialect == Dialect.MYSQL:
+                return f"YEAR({quoted_field}) = {ph}", [value]
+            else:  # SQLite
+                return f"CAST(STRFTIME('%Y', {quoted_field}) AS INTEGER) = {ph}", [value]
+        if operator == "month":
+            if self.dialect == Dialect.POSTGRESQL:
+                return f"EXTRACT(MONTH FROM {quoted_field}) = {ph}", [value]
+            elif self.dialect == Dialect.MYSQL:
+                return f"MONTH({quoted_field}) = {ph}", [value]
+            else:  # SQLite
+                return f"CAST(STRFTIME('%m', {quoted_field}) AS INTEGER) = {ph}", [value]
+        if operator == "day":
+            if self.dialect == Dialect.POSTGRESQL:
+                return f"EXTRACT(DAY FROM {quoted_field}) = {ph}", [value]
+            elif self.dialect == Dialect.MYSQL:
+                return f"DAY({quoted_field}) = {ph}", [value]
+            else:  # SQLite
+                return f"CAST(STRFTIME('%d', {quoted_field}) AS INTEGER) = {ph}", [value]
+        if operator == "week":
+            if self.dialect == Dialect.POSTGRESQL:
+                return f"EXTRACT(WEEK FROM {quoted_field}) = {ph}", [value]
+            elif self.dialect == Dialect.MYSQL:
+                return f"WEEK({quoted_field}) = {ph}", [value]
+            else:  # SQLite
+                return f"CAST(STRFTIME('%W', {quoted_field}) AS INTEGER) = {ph}", [value]
+        if operator == "quarter":
+            if self.dialect == Dialect.POSTGRESQL:
+                return f"EXTRACT(QUARTER FROM {quoted_field}) = {ph}", [value]
+            elif self.dialect == Dialect.MYSQL:
+                return f"QUARTER({quoted_field}) = {ph}", [value]
+            else:  # SQLite
+                return f"CAST(((CAST(STRFTIME('%m', {quoted_field}) AS INTEGER) - 1) / 3) + 1 AS INTEGER) = {ph}", [value]
+        if operator == "hour":
+            if self.dialect == Dialect.POSTGRESQL:
+                return f"EXTRACT(HOUR FROM {quoted_field}) = {ph}", [value]
+            elif self.dialect == Dialect.MYSQL:
+                return f"HOUR({quoted_field}) = {ph}", [value]
+            else:  # SQLite
+                return f"CAST(STRFTIME('%H', {quoted_field}) AS INTEGER) = {ph}", [value]
+        if operator == "minute":
+            if self.dialect == Dialect.POSTGRESQL:
+                return f"EXTRACT(MINUTE FROM {quoted_field}) = {ph}", [value]
+            elif self.dialect == Dialect.MYSQL:
+                return f"MINUTE({quoted_field}) = {ph}", [value]
+            else:  # SQLite
+                return f"CAST(STRFTIME('%M', {quoted_field}) AS INTEGER) = {ph}", [value]
+        if operator == "second":
+            if self.dialect == Dialect.POSTGRESQL:
+                return f"EXTRACT(SECOND FROM {quoted_field}) = {ph}", [value]
+            elif self.dialect == Dialect.MYSQL:
+                return f"SECOND({quoted_field}) = {ph}", [value]
+            else:  # SQLite
+                return f"CAST(STRFTIME('%S', {quoted_field}) AS INTEGER) = {ph}", [value]
+        if operator == "date":
+            if self.dialect == Dialect.POSTGRESQL:
+                return f"DATE({quoted_field}) = {ph}", [value]
+            elif self.dialect == Dialect.MYSQL:
+                return f"DATE({quoted_field}) = {ph}", [value]
+            else:  # SQLite
+                return f"DATE({quoted_field}) = {ph}", [value]
 
         # Unknown operator falls back to equality so that callers get a
         # predictable result instead of a runtime crash.

@@ -26,6 +26,13 @@ class QuerySet:
         self._order_by: list[str] = []
         self._selected_related: list[str] = []
         self._prefetch_related: list[str] = []
+        self._offset: int | None = None
+        self._limit: int | None = None
+        self._distinct: bool = False
+        self._annotations: dict[str, Any] = {}
+        self._group_by: list[str] = []
+        self._only_fields: set[str] | None = None
+        self._defer_fields: set[str] = set()
 
     def _get_connection(self) -> Any:
         from ..conf.settings import connection_manager
@@ -34,6 +41,23 @@ class QuerySet:
 
     def _get_table_name(self) -> str:
         return self.model._meta.table_name or self.model.__name__.lower() + "s"
+
+    def _clone(self) -> "QuerySet":
+        """Create an independent copy of this QuerySet for proper method chaining."""
+        clone = QuerySet(self.model)
+        clone._filters = self._filters.copy()
+        clone._excludes = self._excludes.copy()
+        clone._order_by = self._order_by.copy()
+        clone._selected_related = self._selected_related.copy()
+        clone._prefetch_related = self._prefetch_related.copy()
+        clone._offset = self._offset
+        clone._limit = self._limit
+        clone._distinct = self._distinct
+        clone._annotations = self._annotations.copy()
+        clone._group_by = self._group_by.copy()
+        clone._only_fields = self._only_fields.copy() if self._only_fields else None
+        clone._defer_fields = self._defer_fields.copy()
+        return clone
 
     def _resolve_lookup(self, field_name: str, value: Any) -> tuple[str, Any]:
         if field_name == "pk":
@@ -56,27 +80,164 @@ class QuerySet:
         return field_name, value
 
     def filter(self, *args: Any, **kwargs: Any) -> "QuerySet":
-        self._filters.append(("AND", kwargs))
-        return self
+        """Filter by Q objects or keyword arguments."""
+        from ..query.expressions import Q
+        clone = self._clone()
+        
+        # Handle Q objects in *args
+        for arg in args:
+            if isinstance(arg, Q):
+                clone._filters.append(("Q", arg))
+            else:
+                raise TypeError(f"filter() takes Q objects or keyword arguments, not {type(arg)}")
+        
+        # Handle keyword arguments
+        if kwargs:
+            clone._filters.append(("AND", kwargs))
+        
+        return clone
 
     def exclude(self, *args: Any, **kwargs: Any) -> "QuerySet":
-        self._excludes.append(("AND", kwargs))
-        return self
+        """Exclude by Q objects or keyword arguments."""
+        from ..query.expressions import Q
+        clone = self._clone()
+        
+        # Handle Q objects in *args
+        for arg in args:
+            if isinstance(arg, Q):
+                clone._excludes.append(("Q", arg))
+            else:
+                raise TypeError(f"exclude() takes Q objects or keyword arguments, not {type(arg)}")
+        
+        # Handle keyword arguments
+        if kwargs:
+            clone._excludes.append(("AND", kwargs))
+        
+        return clone
 
     def order_by(self, *fields: str) -> "QuerySet":
-        self._order_by.extend(fields)
-        return self
+        clone = self._clone()
+        clone._order_by.extend(fields)
+        return clone
 
     def select_related(self, *related: str) -> "QuerySet":
-        self._selected_related.extend(related)
-        return self
+        clone = self._clone()
+        clone._selected_related.extend(related)
+        return clone
 
     def prefetch_related(self, *related: str) -> "QuerySet":
-        self._prefetch_related.extend(related)
-        return self
+        clone = self._clone()
+        clone._prefetch_related.extend(related)
+        return clone
+
+    def distinct(self, *fields: str) -> "QuerySet":
+        """Remove duplicate rows from results."""
+        clone = self._clone()
+        clone._distinct = True
+        return clone
+
+    def none(self) -> "QuerySet":
+        """Return an empty QuerySet."""
+        clone = self._clone()
+        clone._filters.append(("AND", {"pk__in": []}))
+        return clone
+
+    def annotate(self, **annotations: Any) -> "QuerySet":
+        """Add computed fields via aggregation."""
+        from ..query.aggregates import Aggregate
+        
+        clone = self._clone()
+        for alias, aggregate in annotations.items():
+            if not isinstance(aggregate, Aggregate):
+                raise TypeError(f"annotate() expects Aggregate objects, got {type(aggregate)}")
+            clone._annotations[alias] = aggregate
+        return clone
+
+    def aggregate(self, **aggregates: Any) -> dict[str, Any]:
+        """Return aggregation result as dictionary (terminal operation)."""
+        from ..query.aggregates import Aggregate
+        from ..backends.base.dialect import get_safe_builder
+        
+        if not aggregates:
+            return {}
+        
+        conn = self._get_connection()
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        builder = get_safe_builder(engine)
+        
+        table = self._get_table_name()
+        quoted_table = builder.quote_table(table)
+        where, where_params = self._build_where_clause()
+        
+        # Build aggregate select list
+        select_parts = []
+        for alias, aggregate in aggregates.items():
+            if not isinstance(aggregate, Aggregate):
+                raise TypeError(f"aggregate() expects Aggregate objects, got {type(aggregate)}")
+            
+            field_name = aggregate.field_name
+            if field_name != "*":
+                field_name = builder.quote_column(field_name)
+            
+            agg_sql = aggregate.to_sql(field_name)
+            select_parts.append(f"{agg_sql} AS {alias}")
+        
+        sql = f"SELECT {', '.join(select_parts)} FROM {quoted_table}{where}"
+        row = conn.fetchone(sql, where_params)
+        
+        if hasattr(conn, 'close'):
+            conn.close()
+        
+        if not row:
+            return {alias: None for alias in aggregates.keys()}
+        
+        # Convert row to dict
+        if isinstance(row, dict):
+            return row
+        else:
+            return dict(zip(aggregates.keys(), row))
+
+    def only(self, *fields: str) -> "QuerySet":
+        """Select only specified fields (deferred loading)."""
+        clone = self._clone()
+        clone._only_fields = set(fields) if fields else None
+        clone._defer_fields = set()  # Clear any deferred fields
+        return clone
+
+    def defer(self, *fields: str) -> "QuerySet":
+        """Exclude specified fields from selection (deferred loading)."""
+        clone = self._clone()
+        clone._defer_fields.update(fields)
+        # If only_fields was set, we need to remove the deferred fields
+        if clone._only_fields:
+            clone._only_fields -= set(fields)
+        return clone
+
+    def __getitem__(self, key: slice | int) -> "QuerySet" | Model | None:
+        """Support QuerySet slicing: qs[10:20] or qs[0]."""
+        if isinstance(key, slice):
+            clone = self._clone()
+            start = key.start or 0
+            if key.stop is not None:
+                clone._offset = start
+                clone._limit = key.stop - start
+            else:
+                clone._offset = start
+                clone._limit = None
+            return clone
+        elif isinstance(key, int):
+            if key < 0:
+                raise ValueError("Negative indexing is not supported")
+            results = self[key : key + 1].all()
+            return results[0] if results else None
+        else:
+            raise TypeError("QuerySet indices must be slices or integers")
 
     def _build_where_clause(self, connection: Any = None) -> tuple[str, list[Any]]:
         """Build WHERE clause with safe identifier quoting and parameterization."""
+        from ..query.expressions import Q, F
+        
         # Get engine from settings to select the right dialect
         db_config = settings.databases.get("default")
         engine = db_config.engine if db_config else "sqlite"
@@ -85,29 +246,78 @@ class QuerySet:
         conditions: list[str] = []
         params: list[Any] = []
 
+        # Helper to build Q object conditions recursively
+        def build_q_condition(q_obj: Q) -> tuple[str, list[Any]]:
+            """Build SQL for a Q object."""
+            q_conditions = []
+            q_params = []
+            
+            for child in q_obj.children:
+                if isinstance(child, Q):
+                    # Nested Q object
+                    child_sql, child_params = build_q_condition(child)
+                    if child_sql:
+                        q_conditions.append(f"({child_sql})")
+                        q_params.extend(child_params)
+                else:
+                    # (field_name, value) tuple
+                    key, value = child
+                    field_name, operator = builder.parse_lookup(key)
+                    field_name, value = self._resolve_lookup(field_name, value)
+                    condition, cond_params = builder.build_condition(
+                        field_name, operator, value
+                    )
+                    q_conditions.append(condition)
+                    q_params.extend(cond_params)
+            
+            if not q_conditions:
+                return "", []
+            
+            connector = f" {q_obj.connector} "
+            q_sql = connector.join(q_conditions)
+            
+            if q_obj.negated:
+                q_sql = f"NOT ({q_sql})"
+            
+            return q_sql, q_params
+
         # Process include filters
-        for _, kwargs in self._filters:
-            for key, value in kwargs.items():
-                field_name, operator = builder.parse_lookup(key)
-                field_name, value = self._resolve_lookup(field_name, value)
-                condition, cond_params = builder.build_condition(
-                    field_name, operator, value
-                )
-                conditions.append(condition)
-                params.extend(cond_params)
+        for filter_type, filter_data in self._filters:
+            if filter_type == "Q":
+                q_sql, q_params = build_q_condition(filter_data)
+                if q_sql:
+                    conditions.append(q_sql)
+                    params.extend(q_params)
+            elif filter_type == "AND":
+                # Regular keyword argument filters
+                for key, value in filter_data.items():
+                    field_name, operator = builder.parse_lookup(key)
+                    field_name, value = self._resolve_lookup(field_name, value)
+                    condition, cond_params = builder.build_condition(
+                        field_name, operator, value
+                    )
+                    conditions.append(condition)
+                    params.extend(cond_params)
 
         # Process exclude filters (NOT (...))
-        for _, kwargs in self._excludes:
-            for key, value in kwargs.items():
-                field_name, operator = builder.parse_lookup(key)
-                field_name, value = self._resolve_lookup(field_name, value)
-                condition, cond_params = builder.build_condition(
-                    field_name, operator, value
-                )
-                # Negate the condition
-                negated = f"NOT ({condition})"
-                conditions.append(negated)
-                params.extend(cond_params)
+        for filter_type, filter_data in self._excludes:
+            if filter_type == "Q":
+                q_sql, q_params = build_q_condition(filter_data)
+                if q_sql:
+                    conditions.append(f"NOT ({q_sql})")
+                    params.extend(q_params)
+            elif filter_type == "AND":
+                # Regular keyword argument filters
+                for key, value in filter_data.items():
+                    field_name, operator = builder.parse_lookup(key)
+                    field_name, value = self._resolve_lookup(field_name, value)
+                    condition, cond_params = builder.build_condition(
+                        field_name, operator, value
+                    )
+                    # Negate the condition
+                    negated = f"NOT ({condition})"
+                    conditions.append(negated)
+                    params.extend(cond_params)
 
         if conditions:
             return " WHERE " + " AND ".join(conditions), params
@@ -237,6 +447,12 @@ class QuerySet:
         obj = Manager(self.model).create(**kwargs)
         return obj
 
+    def bulk_create(self, objs: list[Model], batch_size: int = 1000) -> list[Model]:
+        """Create multiple models in bulk."""
+        for obj in objs:
+            obj.save()
+        return objs
+
     def delete(self, connection: Any = None) -> int:
         """Delete all models matching this QuerySet safely."""
         conn = connection or self._get_connection()
@@ -260,7 +476,9 @@ class QuerySet:
         return rowcount
 
     def update(self, connection: Any = None, **values: Any) -> int:
-        """Update all models matching this QuerySet with safe identifier quoting."""
+        """Update all models matching this QuerySet with safe identifier quoting and F expression support."""
+        from ..query.expressions import F
+        
         if not values:
             return 0
 
@@ -273,14 +491,20 @@ class QuerySet:
         quoted_table = builder.quote_table(table)
         where, where_params = self._build_where_clause()
 
-        # Build SET clause with safe identifier quoting
+        # Build SET clause with safe identifier quoting and F expression support
         set_parts = []
         set_params = []
         for key, val in values.items():
             quoted_col = builder.quote_column(key)
-            ph = builder.param_placeholder
-            set_parts.append(f"{quoted_col} = {ph}")
-            set_params.append(val)
+            
+            if isinstance(val, F):
+                # F expression: use field reference directly without parameterization
+                set_parts.append(f"{quoted_col} = {val.name}")
+            else:
+                # Regular value: parameterize
+                ph = builder.param_placeholder
+                set_parts.append(f"{quoted_col} = {ph}")
+                set_params.append(val)
 
         # Combine SET params with WHERE params
         all_params = set_params + where_params
