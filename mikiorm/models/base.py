@@ -8,7 +8,7 @@ from typing import Any
 
 from .fields import AutoField, Field
 from .meta import MetaOptions
-from .registry import ModelRegistry
+from .register import ModelRegistry, register as register_decorator
 from .relationships import ManyToManyField
 
 logger = logging.getLogger(__name__)
@@ -164,11 +164,10 @@ class ModelMeta(type):
         return cls
 
 
-def register(*models: type[Model], app_label: str | None = None) -> Any:
-    """
-    Universal standard way to register models. 
-    Can be used as a decorator or a function call.
+def register(*models: type[Model], app_label: str | None = None, app: str = 'default') -> Any:
+    """Universal standard way to register models. 
     
+    Can be used as a decorator or a function call.
     This ensures models in any folder are discovered for migrations 
     as long as the file is imported once or the folder is listed in MODEL_PATHS.
 
@@ -176,17 +175,22 @@ def register(*models: type[Model], app_label: str | None = None) -> Any:
         @register
         class User(Model): ...
         
-        @register(app_label="catalog")
+        @register(app_label="catalog")  # Legacy
+        class Product(Model): ...
+        
+        @register(app="products")  # New
         class Product(Model): ...
 
         register(OtherModel, AnotherModel)
     """
     def _register_single(model: type[Model]) -> type[Model]:
         # Determine app_label if not explicitly set in Meta
+        app_name = app_label or app
+        
         if hasattr(model, "_meta"):
             # Priority: explicit argument > Meta attribute > module inference
-            if app_label is not None:
-                model._meta.app_label = app_label
+            if app_name and app_name != 'default':
+                model._meta.app_label = app_name
 
             if model._meta.app_label is None:
                 module_name = model.__module__
@@ -197,12 +201,13 @@ def register(*models: type[Model], app_label: str | None = None) -> Any:
                     # Fallback to the top-level package name or module name
                     inferred_label = module_name.split(".")[0]
                 model._meta.app_label = inferred_label
-
-        ModelRegistry.register_model(model)
+        
+        # Use unified registration system
+        register_decorator(app=app_name)(model)
         return model
 
     if not models:
-        # Used as @register(app_label="...")
+        # Used as @register(app_label="...") or @register(app="...")
         return _register_single
 
     for model in models:

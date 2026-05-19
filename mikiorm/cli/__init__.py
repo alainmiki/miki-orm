@@ -1,21 +1,22 @@
 """CLI management package for mikiorm.
 
 Provides:
-- Infrastructure for command groups and managers
+- Unified CLI with migration, database, and model commands
 - Configuration loading with YAML/TOML support
 - Environment variable substitution
-- CLI utilities and helpers
+- Command groups and configuration management
 """
 
-from .infrastructure import (
+from .cli import (
     ConfigFormat,
     CLIConfig,
     ConfigValidator,
     ConfigLoader,
     CommandGroup,
     CLIManager,
+    load_settings,
+    main,
 )
-from .cli import main
 
 __all__ = [
     "ConfigFormat",
@@ -24,5 +25,6 @@ __all__ = [
     "ConfigLoader",
     "CommandGroup",
     "CLIManager",
+    "load_settings",
     "main",
 ]
