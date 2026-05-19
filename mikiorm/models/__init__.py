@@ -2,6 +2,8 @@
 
 from . import fields
 from .base import Model, ModelMeta, ObjectDoesNotExist, MultipleObjectsReturned, ConcurrencyError, register
+from .app_registry import AppRegistry, AppConfig, get_default_registry, set_default_registry
+from .registry import ModelRegistry
 from .fields import (
     AutoField,
     BigAutoField,
@@ -53,6 +55,12 @@ __all__ = [
     "MultipleObjectsReturned",
     "ConcurrencyError",
     "register",
+    # --- app registry ---
+    "AppRegistry",
+    "AppConfig",
+    "get_default_registry",
+    "set_default_registry",
+    "ModelRegistry",
     # --- fields ---
     "Field",
     "AutoField",

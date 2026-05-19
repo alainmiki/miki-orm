@@ -5,6 +5,7 @@ from .backends import Postgres,SQLite,MySQL
 from .conf.settings import configure, settings
 from .migrations.engine import MigrationEngine
 from .unit_of_work.transaction import atomic, async_atomic, get_current_transaction
+from .query.expressions import Q, F
 
 from . import models
 
@@ -37,4 +38,6 @@ __all__ = [
     "atomic",
     "async_atomic",
     "get_current_transaction",
+    "Q",
+    "F",
 ]

@@ -40,9 +40,8 @@ class MigrationEngine:
     def _ensure_migrations_table(self, connection: Any, target: str = "default") -> None:
         """Ensure the migrations tracking table exists."""
         from ..backends.base.dialect import get_safe_builder
-        from ..settings import settings
+        from ..conf.settings import settings
 
-        db_config = settings.get_database("default")
         db_config = settings.get_database(target)
         builder = get_safe_builder(db_config.engine)
 
@@ -72,13 +71,13 @@ class MigrationEngine:
     def get_applied_migrations(self, connection: Any, target: str = "default") -> list[str]:
         """Return a list of applied migration names from the database."""
         from ..backends.base.dialect import get_safe_builder
-        from ..settings import settings
+        from ..conf.settings import settings
 
         db_config = settings.get_database(target)
         builder = get_safe_builder(db_config.engine)
 
         quoted_table = builder.quote_table("_mikiorm_migrations")
-        sql = f"SELECT name FROM {quoted_table} WHERE status = 'applied' ORDER BY applied_at ASC, id ASC"
+        sql = f"SELECT name FROM {quoted_table} ORDER BY applied_at ASC, id ASC"
         rows = connection.fetchall(sql, ())
         return [row[0] for row in rows]
 
@@ -112,7 +111,6 @@ class MigrationEngine:
 
             from ..models.registry import ModelRegistry
             if not ModelRegistry.all_models():
-                logger.warning("No registered models found. Use @register or check your imports.")
                 logger.warning("No registered models found. Ensure modules with @register are imported.")
                 return []
 
@@ -163,9 +161,32 @@ class MigrationEngine:
     def get_missing_migration_operations(self, connection: Any) -> list[operations.MigrationOperation]:
         """Generate operations for model changes not yet captured in migration files."""
         self.discover_models()
-        from ..settings import settings
+        from ..conf.settings import settings
         db_config = settings.get_database("default")
-        return generate_migration_operations(connection, db_config.engine)
+        
+        ops = generate_migration_operations(connection, db_config.engine)
+        
+        # Validate operations
+        self._validate_operations(ops)
+        
+        return ops
+
+    def _validate_operations(self, ops: list[operations.MigrationOperation]) -> None:
+        """Validate migration operations for common issues."""
+        seen_names = set()
+        for op in ops:
+            # Check for duplicate operations on same table/field
+            if op.operation_type == "create_table":
+                table_name = op.payload.get("name", "")
+                if table_name in seen_names:
+                    logger.warning(f"Duplicate create_table operation for table: {table_name}")
+                seen_names.add(table_name)
+            elif op.operation_type in ("add_field", "alter_field", "drop_field", "remove_field"):
+                field_key = (op.payload.get("model_name", ""), op.payload.get("field_name", ""))
+                if field_key in seen_names:
+                    logger.warning(f"Multiple operations on field: {field_key}")
+                seen_names.add(field_key)
+
 
     def _save_migration(self, ops: list[operations.MigrationOperation]) -> list[operations.MigrationOperation]:
             os.makedirs(self.migrations_path, exist_ok=True) 
@@ -178,19 +199,18 @@ class MigrationEngine:
             return ops
 
     def _apply_operations_internally(
-        self, operations: list[operations.MigrationOperation], connection: Any = None
+        self, operations: list[operations.MigrationOperation], connection: Any = None, target: str = "default"
     ) -> None:
         """Internal helper to apply operations without a migration file."""
         self.discover_models()
-        backend_editor = self._get_backend_editor(connection)
-        backend_editor = self._get_backend_editor(connection, target="default")
+        backend_editor = self._get_backend_editor(connection, target=target)
         schema_editor = _MigrationSchemaEditor(backend_editor)
         self._apply_migration_operations(operations, connection)
 
     def _write_migration_file(
         self, filepath: str, ops: list[operations.MigrationOperation]
     ) -> None:
-        """Write a migration Python file with forward and reverse operations."""
+        """Write a migration Python file with forward and reverse operations (atomically)."""
         # Collect all field type imports
         field_types: set[tuple[str, str]] = set()
         for op in ops:
@@ -241,20 +261,18 @@ class MigrationEngine:
         lines.append("    operations = [apply_migration]")
         lines.append("    rollback_operations = [rollback_migration]")
 
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-
-        # Atomic file write to avoid partial migrations
+        # Atomic file write: write to temp file first, then rename
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
         tmp_filepath = f"{filepath}.tmp"
         try:
             with open(tmp_filepath, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines))
             os.replace(tmp_filepath, filepath)
+            logger.debug(f"Wrote migration file: {filepath}")
         except Exception as e:
             if os.path.exists(tmp_filepath):
                 os.remove(tmp_filepath)
             raise RuntimeError(f"Failed to write migration file: {e}")
-        logger.debug(f"Wrote migration file: {filepath}")
 
     def _write_operation_call(self, lines: list[str], op: operations.MigrationOperation, 
                               forward: bool) -> None:
@@ -391,8 +409,7 @@ class MigrationEngine:
         target_alias = target or "default"
         own_connection = False
         if connection is None:
-            from ..settings import settings
-            db_config = settings.get_database(target)
+            from ..conf.settings import settings
             db_config = settings.get_database(target_alias)
             adapter = db_config.get_adapter()
             connection = adapter.connect(db_config.get_connection_config())
@@ -400,38 +417,27 @@ class MigrationEngine:
 
         from ..unit_of_work.transaction import atomic
         from ..backends.base.dialect import get_safe_builder
-        from ..settings import settings as miki_settings
+        from ..conf.settings import settings
 
-        db_config = miki_settings.get_database(target_alias)
+        db_config = settings.get_database(target_alias)
         is_sqlite = db_config.engine == "sqlite"
 
         try:
             # Ensure all models are registered before migration begins
             self.discover_models()
 
-            with atomic(connection=connection):
-                # Ensure the migrations tracking table exists at the start of the transaction
-                self._ensure_migrations_table(connection)
-            # Ensure infrastructure exists before starting the main transaction
+            # Ensure infrastructure exists (outside main transaction for safety)
             self._ensure_migrations_table(connection, target_alias)
+            
+            # Acquire migration lock to prevent concurrent migrations
             lock_id = self._acquire_lock(connection, target_alias)
             if not lock_id:
                 raise RuntimeError("Could not acquire migration lock; another migration may be running")
 
-                # Acquire migration lock
-                lock_id = self._acquire_lock(connection)
-                if not lock_id:
-                    raise RuntimeError("Could not acquire migration lock; another migration may be running")
-
-                applied = self.get_applied_migrations(connection)
             try:
                 applied = self.get_applied_migrations(connection, target_alias)
                 history = MigrationHistory.load_history(self.migrations_path)
                 pending = [m for m in history if m not in applied]
-                
-                db_alias = target or "default"
-                db_config = miki_settings.get_database(db_alias)
-                if pending and db_config.engine == "sqlite":
 
                 if not pending:
                     logger.info("No migrations to apply.")
@@ -445,47 +451,28 @@ class MigrationEngine:
                         if db_path and db_path != ":memory:":
                             self._create_sqlite_backup(db_path)
                 
-                from ..backends.base.dialect import get_safe_builder
                 builder = get_safe_builder(db_config.engine)
                 quoted_table = builder.quote_table("_mikiorm_migrations")
                 ph = builder.param_placeholder
 
-                applied_count = 0
+                # Apply each migration atomically
                 for migration_file in pending:
                     filepath = os.path.join(self.migrations_path, migration_file)
-                    self._apply_migration_direct(filepath, connection)
-                # Apply migrations in an atomic block
-                with atomic(connection=connection):
-                    from ..backends.base.dialect import get_safe_builder
-                    builder = get_safe_builder(db_config.engine)
-                    quoted_table = builder.quote_table("_mikiorm_migrations")
-                    ph = builder.param_placeholder
-
-                    # Record application in DB
-                    sql = f"INSERT INTO {quoted_table} (name) VALUES ({ph})"
-                    connection.execute(sql, (migration_file,))
-                    for migration_file in pending:
-                        filepath = os.path.join(self.migrations_path, migration_file)
-                        try:
+                    try:
+                        # Each migration in its own transaction for atomicity
+                        with atomic(connection=connection):
                             self._apply_migration_direct(filepath, connection, target=target_alias)
                             # Record application
                             sql = f"INSERT INTO {quoted_table} (name) VALUES ({ph})"
                             connection.execute(sql, (migration_file,))
                             logger.info(f"Applied migration: {migration_file}")
-                        except Exception as e:
-                            logger.error(f"Failed to apply migration {migration_file}: {e}")
-                            raise
+                    except Exception as e:
+                        logger.error(f"Failed to apply migration {migration_file}: {e}", exc_info=True)
+                        raise
             finally:
                 self._release_lock(connection, lock_id, target_alias)
 
-                    logger.info(f"Applied migration: {migration_file}")
-                    applied_count += 1
-
-                if applied_count == 0:
-                    logger.info("No migrations to apply.")
-                self._release_lock(connection, lock_id)
         except Exception as e:
-            logger.error(f"Migration failed: {e}")
             logger.error(f"Migration failed: {e}", exc_info=True)
             raise
         finally:
@@ -518,24 +505,18 @@ class MigrationEngine:
             logger.warning(f"Failed to create SQLite backup: {e}")
             return None
 
-    def _acquire_lock(self, connection: Any) -> int | None:
     def _acquire_lock(self, connection: Any, target: str = "default") -> int | None:
         """Acquire a migration lock using a dedicated lock table."""
-        from ..settings import settings
+        from ..conf.settings import settings
         db_config = settings.get_database(target)
 
         if db_config.engine == "postgresql":
             # Use native Postgres advisory lock
-            connection.execute("SELECT pg_advisory_lock(1337)")
+            connection.execute("SELECT pg_advisory_lock(1337)", ())
             return 1337
 
         try:
-            connection.execute("CREATE TABLE IF NOT EXISTS _migration_lock (id INTEGER PRIMARY KEY, locked_at TIMESTAMP)", ())
-            # Try to insert a lock row; fail if already exists
-            cursor = connection.execute("INSERT OR IGNORE INTO _migration_lock (id, locked_at) VALUES (1, CURRENT_TIMESTAMP)", ())
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS _mikiorm_migration_lock (id INTEGER PRIMARY KEY, locked_at TIMESTAMP)", ()
-            )
+            connection.execute("CREATE TABLE IF NOT EXISTS _mikiorm_migration_lock (id INTEGER PRIMARY KEY, locked_at TIMESTAMP)", ())
             # dialect-aware insert ignore
             sql = "INSERT OR IGNORE INTO _mikiorm_migration_lock (id, locked_at) VALUES (1, CURRENT_TIMESTAMP)"
             if db_config.engine == "mysql":
@@ -548,23 +529,20 @@ class MigrationEngine:
         except Exception:
             return None
 
-    def _release_lock(self, connection: Any, lock_id: int) -> None:
     def _release_lock(self, connection: Any, lock_id: int, target: str = "default") -> None:
         """Release migration lock."""
-        from ..settings import settings
+        from ..conf.settings import settings
         db_config = settings.get_database(target)
 
         if db_config.engine == "postgresql" and lock_id == 1337:
-            connection.execute("SELECT pg_advisory_unlock(1337)")
+            connection.execute("SELECT pg_advisory_unlock(1337)", ())
             return
 
         try:
-            connection.execute("DELETE FROM _migration_lock WHERE id = ?", (lock_id,))
             connection.execute("DELETE FROM _mikiorm_migration_lock WHERE id = ?", (lock_id,))
         except Exception:
             pass
 
-    def _apply_migration_direct(self, filepath: str, connection: Any) -> None:
     def _apply_migration_direct(self, filepath: str, connection: Any, target: str = "default") -> None:
         """Load migration module and execute apply_migration with safe SQL building."""
         spec = importlib.util.spec_from_file_location("migration", filepath)
@@ -577,86 +555,74 @@ class MigrationEngine:
 
         if hasattr(module, "apply_migration"):
             # Obtain backend-specific schema editor
-            backend_editor = self._get_backend_editor(connection)
             backend_editor = self._get_backend_editor(connection, target=target)
             schema_editor = _MigrationSchemaEditor(backend_editor)
             module.apply_migration(None, schema_editor)
 
-    def rollback(
-        self, connection: Any = None, steps: int = 1, target: str | None = None
-    ) -> None:
-        """Rollback the last N migrations by executing their rollback_migration functions."""
     def rollback(self, connection: Any = None, steps: int = 1, target: str | None = None) -> None:
         """Rollback applied migrations and update tracking history."""
         target_alias = target or "default"
         own_connection = False
         if connection is None:
-            from ..settings import settings
-            db_config = settings.get_database(target)
+            from ..conf.settings import settings
             db_config = settings.get_database(target_alias)
             adapter = db_config.get_adapter()
             connection = adapter.connect(db_config.get_connection_config())
             own_connection = True
 
-        # Acquire lock
-        lock_id = self._acquire_lock(connection)
-        self.discover_models()
-        self._ensure_migrations_table(connection, target_alias)
-        lock_id = self._acquire_lock(connection, target_alias)
-        if not lock_id:
-            raise RuntimeError("Could not acquire migration lock for rollback")
+        from ..unit_of_work.transaction import atomic
+        from ..backends.base.dialect import get_safe_builder
+        from ..conf.settings import settings
 
         try:
             self.discover_models()
-            applied = self.get_applied_migrations(connection, target_alias)
-            if not applied:
-                logger.info("No migrations to rollback.")
-                return
+            self._ensure_migrations_table(connection, target_alias)
+            lock_id = self._acquire_lock(connection, target_alias)
+            if not lock_id:
+                raise RuntimeError("Could not acquire migration lock for rollback")
 
-            connection.execute("BEGIN", ())
-            to_rollback = applied[-steps:]
-            from ..backends.base.dialect import get_safe_builder
-            from ..settings import settings as miki_settings
-            db_config = miki_settings.get_database(target_alias)
-            builder = get_safe_builder(db_config.engine)
-            quoted_table = builder.quote_table("_mikiorm_migrations")
-            ph = builder.param_placeholder
+            try:
+                applied = self.get_applied_migrations(connection, target_alias)
+                if not applied:
+                    logger.info("No migrations to rollback.")
+                    return
 
-            history = MigrationHistory.load_history(self.migrations_path)
-            to_rollback = history[-steps:] if steps <= len(history) else history
-            from ..unit_of_work.transaction import atomic
-            with atomic(connection=connection):
+                db_config = settings.get_database(target_alias)
+                builder = get_safe_builder(db_config.engine)
+                quoted_table = builder.quote_table("_mikiorm_migrations")
+                ph = builder.param_placeholder
+
+                history = MigrationHistory.load_history(self.migrations_path)
+                to_rollback = history[-steps:] if steps <= len(history) else history
+                
+                # Rollback each migration in reverse order, each in its own transaction
                 for migration_file in reversed(to_rollback):
                     filepath = os.path.join(self.migrations_path, migration_file)
                     if not os.path.exists(filepath):
-                        raise FileNotFoundError(f"Migration file missing: {migration_file}")
+                        logger.warning(f"Migration file missing for rollback: {migration_file}")
+                        continue
 
-            for migration_file in reversed(to_rollback):
-                filepath = os.path.join(self.migrations_path, migration_file)
-                self._rollback_migration_direct(filepath, connection)
-                logger.info(f"Rolled back migration: {migration_file}")
-                # Remove file after successful rollback
-                os.remove(filepath)
-                    self._rollback_migration_direct(filepath, connection, target=target_alias)
-                    
-                    # Remove from DB history
-                    sql = f"DELETE FROM {quoted_table} WHERE name = {ph}"
-                    connection.execute(sql, (migration_file,))
-                    logger.info(f"Rolled back: {migration_file}")
+                    try:
+                        with atomic(connection=connection):
+                            self._rollback_migration_direct(filepath, connection, target=target_alias)
+                            
+                            # Remove from DB history
+                            sql = f"DELETE FROM {quoted_table} WHERE name = {ph}"
+                            connection.execute(sql, (migration_file,))
+                            logger.info(f"Rolled back: {migration_file}")
+                    except Exception as e:
+                        logger.error(f"Failed to rollback {migration_file}: {e}", exc_info=True)
+                        raise
 
-            connection.commit()
+            finally:
+                self._release_lock(connection, lock_id, target_alias)
         except Exception as e:
-            connection.rollback()
-            logger.error(f"Rollback failed: {e}")
             logger.error(f"Rollback failed: {e}", exc_info=True)
             raise
         finally:
-            self._release_lock(connection, lock_id)
-            self._release_lock(connection, lock_id, target_alias)
             if own_connection:
                 connection.close()
 
-    def _rollback_migration_direct(self, filepath: str, connection: Any) -> None:
     def _rollback_migration_direct(self, filepath: str, connection: Any, target: str = "default") -> None:
         """Load migration module and execute rollback_migration."""
         spec = importlib.util.spec_from_file_location("migration", filepath)
@@ -668,14 +634,13 @@ class MigrationEngine:
         spec.loader.exec_module(module)
 
         if hasattr(module, "rollback_migration"):
-            backend_editor = self._get_backend_editor(connection)
             backend_editor = self._get_backend_editor(connection, target=target)
             schema_editor = _MigrationSchemaEditor(backend_editor)
             module.rollback_migration(None, schema_editor)
 
     def _get_backend_editor(self, connection: Any, target: str = "default") -> Any:
         """Returns the dialect-aware schema editor for the connection."""
-        from ..settings import settings
+        from ..conf.settings import settings
         db_config = settings.get_database(target)
         engine = db_config.engine if db_config else "sqlite"
 
@@ -688,12 +653,10 @@ class MigrationEngine:
         elif engine == "mysql":
             from mikiorm.backends.mysql.schema import DatabaseSchemaEditor
             return DatabaseSchemaEditor(connection)
-            
+        
         from ..backends.base.schema_editor import SchemaEditor
         from ..backends.base.dialect import get_safe_builder
 
-        db_config = settings.get_database(target)
-        engine = db_config.engine if db_config else "sqlite"
         builder = get_safe_builder(engine)
         return SchemaEditor(connection, builder.dialect)
 
