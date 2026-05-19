@@ -1,9 +1,22 @@
 """Model definitions package."""
 
 from . import fields
-from .base import Model, ModelMeta, ObjectDoesNotExist, MultipleObjectsReturned, ConcurrencyError, register
-from .app_registry import AppRegistry, AppConfig, get_default_registry, set_default_registry
-from .registry import ModelRegistry
+from .base import Model, ModelMeta, ObjectDoesNotExist, MultipleObjectsReturned, ConcurrencyError
+from .register import (
+    AppRegistry, 
+    AppConfig, 
+    get_default_registry, 
+    set_default_registry,
+    ModelRegistry,
+    register,
+    register_model,
+    register_app,
+    get_model,
+    auto_discover,
+    list_models,
+    get_all_models,
+    get_apps,
+)
 from .fields import (
     AutoField,
     BigAutoField,
@@ -54,8 +67,15 @@ __all__ = [
     "ObjectDoesNotExist",
     "MultipleObjectsReturned",
     "ConcurrencyError",
+    # --- registration functions & classes ---
     "register",
-    # --- app registry ---
+    "register_model",
+    "register_app",
+    "get_model",
+    "auto_discover",
+    "list_models",
+    "get_all_models",
+    "get_apps",
     "AppRegistry",
     "AppConfig",
     "get_default_registry",

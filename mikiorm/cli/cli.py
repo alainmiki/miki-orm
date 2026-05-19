@@ -1,42 +1,32 @@
 #!/usr/bin/env python3
-"""
-miki-orm CLI Tool
-=================
-Provides a command-line interface for managing miki-orm migrations.
+"""Unified miki-orm CLI Tool - imports from consolidated cli_unified module."""
 
-Usage:
-    python -m mikiorm.cli makemigrations
-    python -m mikiorm.cli migrate
-"""
+# Re-export from consolidated CLI for backward compatibility
+from .cli_unified import (
+    ConfigFormat,
+    CLIConfig,
+    ConfigValidator,
+    ConfigLoader,
+    CommandGroup,
+    CLIManager,
+    load_settings,
+    main,
+)
 
-import argparse
-import sys
-import os
-import importlib
-import re
-import logging
+__all__ = [
+    "ConfigFormat",
+    "CLIConfig",
+    "ConfigValidator",
+    "ConfigLoader",
+    "CommandGroup",
+    "CLIManager",
+    "load_settings",
+    "main",
+]
 
-import mikiorm
-from mikiorm.migrations.engine import MigrationEngine
-from mikiorm.models.registry import ModelRegistry
-from mikiorm.settings import connection_manager
+if __name__ == "__main__":
+    main()
 
-# Configure logging to be clean for CLI usage
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-logger = logging.getLogger("miki-orm.cli")
-
-def load_settings(settings_module: str):
-    """Attempt to load the specified settings module to trigger mikiorm.configure()."""
-    try:
-        importlib.import_module(settings_module)
-        logger.info(f"Using settings from: {settings_module}")
-    except ImportError as e:
-        logger.error(f"Could not find settings module '{settings_module}'.")
-        logger.error(f"Details: {e}")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"Error loading settings from '{settings_module}': {e}")
-        sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser(
