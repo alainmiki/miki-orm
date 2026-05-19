@@ -146,3 +146,5 @@ DATABASES = {
 
 ## CI
 GitHub Actions CI is configured in `.github/workflows/ci.yml` and validates SQLite and PostgreSQL sync scenarios.
+
+continue with the todo but first fix the overlap in app registry and model registry , the register function in the models base.py. cli infrastructure and the cli in the cli folder. safe_builder,builder and the dialects in the backends. then continue with the todo phase 6 season 2
