@@ -24,11 +24,31 @@ import pytest
 from mikiorm import configure, settings, atomic, async_atomic, get_current_transaction
 from mikiorm.models.base import Model
 from mikiorm.models.fields import (
-    AutoField, CharField, TextField, BooleanField, IntegerField,
-    BigIntegerField, SmallIntegerField, PositiveIntegerField, PositiveSmallIntegerField,
-    FloatField, DecimalField, DateTimeField, DateField, TimeField, UUIDField,
-    JSONField, BinaryField, EmailField, URLField, SlugField, GenericIPAddressField, FilePathField,
-    ForeignKey, ManyToManyField,
+    AutoField,
+    CharField,
+    TextField,
+    BooleanField,
+    IntegerField,
+    BigIntegerField,
+    SmallIntegerField,
+    PositiveIntegerField,
+    PositiveSmallIntegerField,
+    FloatField,
+    DecimalField,
+    DateTimeField,
+    DateField,
+    TimeField,
+    UUIDField,
+    JSONField,
+    BinaryField,
+    EmailField,
+    URLField,
+    SlugField,
+    GenericIPAddressField,
+    FilePathField,
+    ForeignKey,
+    ManyToManyField,
+    DurationField,
 )
 from mikiorm.models.relationships import CASCADE, SET_NULL, PROTECT
 

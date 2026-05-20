@@ -22,9 +22,9 @@ import time
 from collections import deque
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Optional
 
 if TYPE_CHECKING:
     from .adapter import BaseAdapter, BaseAsyncAdapter
@@ -713,13 +713,6 @@ class ConnectionPool:
                 connection.close()
         except Exception as e:
             logger.warning("Error closing connection: %s", e)
-
-    def _wait_for_available_connection(self, timeout: float) -> None:
-        start = time.time()
-        while time.time() - start < timeout:
-            if self._available or len(self._in_use) < self.max_size:
-                return
-            time.sleep(0.01)
 
     def get_statistics(self) -> PoolStatistics:
         with self._lock:

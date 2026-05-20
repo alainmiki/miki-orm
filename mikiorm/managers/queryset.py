@@ -7,7 +7,7 @@ from typing import Any, Iterable
 
 from mikiorm.managers.base import Manager
 
-from ..conf.settings import settings, connection_manager
+from ..conf.settings import settings
 from ..models.base import Model, ObjectDoesNotExist, MultipleObjectsReturned
 from ..models.relationships import ForeignKey
 from ..query import QueryBuilder

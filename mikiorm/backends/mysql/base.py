@@ -3,12 +3,24 @@
 from __future__ import annotations
 
 import ssl
-from typing import Any, Dict, Iterable, List, Tuple, Optional
-
-import pymysql
-from pymysql.cursors import DictCursor
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Tuple, Optional
 
 from mikiorm.backends.base import BaseAdapter, BaseConnection, SyncConnectionPool
+
+
+if TYPE_CHECKING:
+    import pymysql
+    from pymysql.cursors import DictCursor
+
+
+def _import_pymysql() -> "module":
+    import pymysql
+    return pymysql
+
+
+def _import_pymysql_cursor_cls() -> "type":
+    from pymysql.cursors import DictCursor
+    return DictCursor
 
 
 class MySQLConnection(BaseConnection):
@@ -18,9 +30,9 @@ class MySQLConnection(BaseConnection):
     def param_placeholder(self) -> str:
         return "%s"
 
-    def __init__(self, conn: pymysql.connections.Connection) -> None:
+    def __init__(self, conn: "pymysql.connections.Connection") -> None:
         self._conn = conn
-        self._cursor: Optional[pymysql.cursors.Cursor] = None
+        self._cursor: Optional["pymysql.cursors.Cursor"] = None
 
     def execute(self, sql: str, params: Iterable[Any] | None = None) -> Any:
         """Execute SQL with parameterized query - never string interpolation."""
@@ -30,6 +42,7 @@ class MySQLConnection(BaseConnection):
         return cursor
 
     def fetchall(self, sql: str, params: Iterable[Any] | None = None) -> List[Tuple[Any, ...]]:
+        DictCursor = _import_pymysql_cursor_cls()
         cursor = self._conn.cursor(cursor=DictCursor)
         cursor.execute(sql, params or ())
         rows = cursor.fetchall()
@@ -37,6 +50,7 @@ class MySQLConnection(BaseConnection):
         return [tuple(row.values()) for row in rows]
 
     def fetchone(self, sql: str, params: Iterable[Any] | None = None) -> Optional[Tuple[Any, ...]]:
+        DictCursor = _import_pymysql_cursor_cls()
         cursor = self._conn.cursor(cursor=DictCursor)
         cursor.execute(sql, params or ())
         row = cursor.fetchone()
@@ -44,6 +58,7 @@ class MySQLConnection(BaseConnection):
         return tuple(row.values()) if row else None
 
     def fetchmany(self, sql: str, params: Iterable[Any] | None = None, size: int = 100) -> List[Tuple[Any, ...]]:
+        DictCursor = _import_pymysql_cursor_cls()
         cursor = self._conn.cursor(cursor=DictCursor)
         cursor.execute(sql, params or ())
         rows = cursor.fetchmany(size)
@@ -84,6 +99,8 @@ class MySQLAdapter(BaseAdapter):
 
     def connect(self, config: Dict[str, Any]) -> MySQLConnection:
         ssl_context = self._build_ssl_context(config.get("SSL", {}))
+        pymysql = _import_pymysql()
+        DictCursor = _import_pymysql_cursor_cls()
         
         conn = pymysql.connect(
             host=config.get("HOST", "localhost"),

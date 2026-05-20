@@ -14,7 +14,7 @@ Validates:
 import pytest
 import threading
 import time
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, patch
 from datetime import datetime, timedelta
 
 from mikiorm.backends.base.pool import (

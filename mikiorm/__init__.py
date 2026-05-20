@@ -6,6 +6,16 @@ from .conf.settings import configure, configure_from_module, settings
 from .migrations.engine import MigrationEngine
 from .unit_of_work.transaction import atomic, async_atomic, get_current_transaction
 from .query.expressions import Q, F
+from .models.fields import (
+    BooleanField,
+    CharField,
+    DateField,
+    DateTimeField,
+    DurationField,
+    FloatField,
+    IntegerField,
+    TextField,
+)
 
 from . import models
 

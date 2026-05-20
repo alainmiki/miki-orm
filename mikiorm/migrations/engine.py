@@ -382,19 +382,23 @@ class MigrationEngine:
         # Collect all field type imports
         field_types: set[tuple[str, str]] = set()
         for op in ops:
-            if op.operation_type in ("create_table", "add_field", "alter_field"):
+            items = []
+            if op.operation_type == "create_table":
                 cols = op.payload.get("columns", [])
-                items = list(cols) if isinstance(cols, list) else [op.payload]
+                items = list(cols) if isinstance(cols, list) else []
                 if "old_field_type" in op.payload:
                     items.append({"field_type": op.payload["old_field_type"]})
+            elif op.operation_type in ("add_field", "alter_field"):
+                items = [op.payload]
+                if "old_field_type" in op.payload:
+                    items.append({"field_type": op.payload["old_field_type"]})
+            # No field type import needed for indexes or other operations
 
-                for item in items:
-                    ftype = item.get("field_type", "")
-                    if ftype:
-                        short = ftype.rsplit(".", 1)[-1]
-                        field_types.add((short, ftype))
-            elif op.operation_type == "create_index":
-                pass  # No field type import needed for indexes
+            for item in items:
+                ftype = item.get("field_type", "")
+                if ftype:
+                    short = ftype.rsplit(".", 1)[-1]
+                    field_types.add((short, ftype))
 
         lines: list[str] = []
         lines.append("# Auto-generated migration")
@@ -468,23 +472,22 @@ class MigrationEngine:
         elif op_type == "add_field":
             model = op.payload["model_name"]
             field_type = op.payload["field_type"]
-            kwargs = {k: v for k, v in op.payload.items() if k not in ("model_name", "field_type", "field_kwargs")}
-            kwargs.update(op.payload.get("field_kwargs", {}))
+            field_kwargs = op.payload.get("field_kwargs", {})
             short = field_type.rsplit(".", 1)[-1]
             mod = field_type.rsplit(".", 1)[0]
-            kw_str = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+            kw_str = ", ".join(f"{k}={v!r}" for k, v in field_kwargs.items())
             if forward:
                 lines.append(f"    schema_editor.execute_operation(operations.AddField(model_name='{model}', field={short}({kw_str})))")
             else:
-                lines.append(f"    schema_editor.execute_operation(operations.RemoveField(model_name='{model}', field_name='{kwargs.get('name')}'))")
+                field_name = op.payload.get("field_name", "")
+                lines.append(f"    schema_editor.execute_operation(operations.RemoveField(model_name='{model}', field_name='{field_name}'))")
 
         elif op_type == "alter_field":
             model = op.payload["model_name"]
             field_type = op.payload["field_type"]
-            kwargs = {k: v for k, v in op.payload.items() if k not in ("model_name", "field_type", "field_kwargs")}
-            kwargs.update(op.payload.get("field_kwargs", {}))
+            field_kwargs = op.payload.get("field_kwargs", {})
             short = field_type.rsplit(".", 1)[-1]
-            kw_str = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+            kw_str = ", ".join(f"{k}={v!r}" for k, v in field_kwargs.items())
 
             old_field_str = ""
             if "old_field_type" in op.payload:

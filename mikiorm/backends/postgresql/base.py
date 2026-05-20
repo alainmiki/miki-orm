@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
-import psycopg2
-import psycopg2.extras
-from typing import Any, Dict, Iterable, List, Tuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Tuple, Optional
 
 from mikiorm.backends.base import BaseAdapter, BaseConnection, SyncConnectionPool
+
+
+if TYPE_CHECKING:
+    import psycopg2
+    import psycopg2.extras
+
+
+def _import_psycopg2() -> "module":
+    import psycopg2
+    return psycopg2
+
+
+def _import_psycopg2_extras() -> "module":
+    import psycopg2.extras
+    return psycopg2.extras
 
 
 class PostgresConnection(BaseConnection):
@@ -16,9 +29,9 @@ class PostgresConnection(BaseConnection):
     def param_placeholder(self) -> str:
         return "%s"
 
-    def __init__(self, conn: psycopg2.extensions.connection, builder: Any = None) -> None:
+    def __init__(self, conn: "psycopg2.extensions.connection", builder: Any = None) -> None:
         self._conn = conn
-        self._cursor: Optional[psycopg2.extensions.cursor] = None
+        self._cursor: Optional["psycopg2.extensions.cursor"] = None
         self._builder = builder
 
     def execute(self, sql: str, params: Iterable[Any] | None = None) -> Any:
@@ -29,21 +42,24 @@ class PostgresConnection(BaseConnection):
         return cursor
 
     def fetchall(self, sql: str, params: Iterable[Any] | None = None) -> List[Tuple[Any, ...]]:
-        cursor = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        psycopg2_extras = _import_psycopg2_extras()
+        cursor = self._conn.cursor(cursor_factory=psycopg2_extras.DictCursor)
         cursor.execute(sql, params or ())
         rows = cursor.fetchall()
         cursor.close()
         return [tuple(row) for row in rows]
 
     def fetchone(self, sql: str, params: Iterable[Any] | None = None) -> Optional[Tuple[Any, ...]]:
-        cursor = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        psycopg2_extras = _import_psycopg2_extras()
+        cursor = self._conn.cursor(cursor_factory=psycopg2_extras.DictCursor)
         cursor.execute(sql, params or ())
         row = cursor.fetchone()
         cursor.close()
         return tuple(row) if row else None
 
     def fetchmany(self, sql: str, params: Iterable[Any] | None = None, size: int = 100) -> List[Tuple[Any, ...]]:
-        cursor = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        psycopg2_extras = _import_psycopg2_extras()
+        cursor = self._conn.cursor(cursor_factory=psycopg2_extras.DictCursor)
         cursor.execute(sql, params or ())
         rows = cursor.fetchmany(size)
         cursor.close()
@@ -90,6 +106,8 @@ class PostgresAdapter(BaseAdapter):
 
     def connect(self, config: Dict[str, Any]) -> PostgresConnection:
         ssl_context = self._build_ssl_context(config.get("SSL", {}))
+        psycopg2 = _import_psycopg2()
+        psycopg2_extras = _import_psycopg2_extras()
         
         conn = psycopg2.connect(
             dbname=config.get("NAME"),
@@ -102,7 +120,7 @@ class PostgresAdapter(BaseAdapter):
             sslcert=config.get("OPTIONS", {}).get("sslcert"),
             sslkey=config.get("OPTIONS", {}).get("sslkey"),
             ssl=ssl_context,
-            cursor_factory=psycopg2.extras.DictCursor,
+            cursor_factory=psycopg2_extras.DictCursor,
             # Connection pooling settings
             connect_timeout=config.get("OPTIONS", {}).get("connect_timeout", 10),
         )

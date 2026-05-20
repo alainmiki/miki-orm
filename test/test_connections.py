@@ -236,20 +236,6 @@ class TestMigrationWithSQLite:
         from mikiorm.models.fields import CharField, IntegerField
         from mikiorm.migrations.operations import AddField, AlterField, RemoveField
         from mikiorm.settings import connection_manager
-        from mikiorm.conf.settings import AppConfig
-
-        # Create a test app
-        app_dir = tmp_path / "test_app"
-        app_dir.mkdir()
-        (app_dir / "__init__.py").write_text("")
-        models_py = app_dir / "models.py"
-        models_py.write_text(
-            "from mikiorm import models\n"
-            "class MigrationTestModel(models.Model):\n"
-            "    name = models.CharField(max_length=20)\n"
-            "    class Meta:\n"
-            "        table_name = \"migration_test_model\"\n"
-        )
 
         mikiorm.configure({
             "default": {
@@ -257,10 +243,16 @@ class TestMigrationWithSQLite:
                 "NAME": ":memory:",
                 "POOL": {"min_size": 1, "max_size": 1, "timeout": 5},
             }
-        }, installed_apps=[AppConfig(name="test_app", path=str(app_dir))])
+        })
+
+        class MigrationTestModel(models.Model):
+            name = CharField(max_length=20)
+
+            class Meta:
+                table_name = "migration_test_model"
 
         engine = MigrationEngine(migrations_path=str(tmp_path))
-        ops = engine.makemigrations()   # Process all apps
+        ops = engine.makemigrations([MigrationTestModel])
         assert ops
         assert ops[0].operation_type == "create_table"
 
