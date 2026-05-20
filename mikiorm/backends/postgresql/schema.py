@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, Type
 
-from mikiorm.query.safe_builder import SafeBuilder
+from mikiorm.query import SafeBuilder
 from mikiorm.backends.base.schema import BaseSchemaEditor
 
 

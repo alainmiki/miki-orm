@@ -1,0 +1,496 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <title>Converted from: 1779220495452-proud-comet.md</title>
+    <meta charset="utf-8"/>
+
+</head>
+<body>
+
+<h1 id="heading-plan3a-django-style-settings2c-startapp-26-startproject-cli-commands">Plan: Django-style Settings, startapp &amp; startproject CLI Commands</h1>
+<h2 id="heading-overview">Overview</h2>
+<p>Enhance <code>mikiorm/conf/settings.py</code> with full Django-inspired configuration (<code>DATABASES</code>, <code>INSTALLED_APPS</code>, <code>SECRET_KEY</code>, etc.) and add two new CLI commands: <code>startapp</code> and <code>startproject</code>.</p><hr />
+<h2 id="heading-current-state-analysis">Current State Analysis</h2>
+<h3 id="heading-working-code-to-build-on">Working code to build on</h3>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>File</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Settings singleton</td>
+<td><code>mikiorm/conf/settings.py</code></td>
+<td>Has <code>DatabaseConfig</code>, <code>Settings</code>, <code>configure()</code>, connection managers. <code>DATABASES</code> supported; no <code>INSTALLED_APPS</code></td>
+</tr>
+<tr>
+<td>App registration</td>
+<td><code>mikiorm/models/register.py</code></td>
+<td>Full <code>AppRegistry</code>, <code>AppConfig</code>, <code>register_app()</code>, <code>auto_discover()</code></td>
+</tr>
+<tr>
+<td>CLI entry point</td>
+<td><code>mikiorm/cli/cli.py</code></td>
+<td><code>main()</code> with makemigrations, migrate, check, shell, inspectdb, etc.</td>
+</tr>
+<tr>
+<td>CLI <code>__main__</code></td>
+<td><code>mikiorm/cli/__main__.py</code></td>
+<td>redirects to <code>cli.main()</code></td>
+</tr>
+<tr>
+<td>Top-level package</td>
+<td><code>mikiorm/__init__.py</code></td>
+<td>Re-exports <code>configure</code>, <code>settings</code> etc.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="heading-key-design-constraints">Key design constraints</h3>
+<ul>
+<li>File structure uses flat patterns (no <code>settings.py</code> at root level as a django-like project entry yet)</li>
+<li>App registration already works programmatically via <code>register_app()</code> — needs Django-style declarative <code>INSTALLED_APPS</code></li>
+<li><code>configure()</code> resets connection pools on reconfiguration — preserve this safety</li>
+<li>Tests exist in <code>test_app_registration.py</code> and <code>test_cli_infrastructure.py</code> — extend rather than rewrite</li>
+</ul>
+<hr />
+<h2 id="heading-detailed-plan">Detailed Plan</h2>
+<h3 id="heading-1-b7-60mikiorm2fconf2fsettings.py60-2014-universal-django-style-settings">1 · <code>mikiorm/conf/settings.py</code> — Universal Django-style settings</h3>
+<h4 id="heading-1.1-60appconfig60-metadata-class-28class-level2c-not-an-instance29">1.1 <code>AppConfig</code> metadata class (class-level, not an instance)</h4>
+<p>Add a new <code>AppConfig</code> class inside <code>conf/settings.py</code> that models <code>INSTALLED_APPS</code> entries:</p><pre>class AppConfig:
+    """Metadata for a single app in INSTALLED_APPS."""
+    __slots__ = ("name", "path", "label")
+
+    def __init__(self, name: str, path: Optional[str] = None, label: Optional[str] = None):
+        self.name = name          # Python import path: e.g. "users"
+        self.path = path          # Filesystem path: e.g. "/proj/apps/users"
+        self.label = label or name.split(".")[-1]
+</pre><h4 id="heading-1.2-60installed_apps60-on-60settings60">1.2 <code>INSTALLED_APPS</code> on <code>Settings</code></h4>
+<p>Add to <code>Settings.__init__()</code>:</p><pre>self.installed_apps: list[AppConfig] = []
+self.secret_key: str = ""
+self.debug: bool = False
+self.allowed_hosts: list[str] = []
+self.use_tz: bool = True
+</pre><p>Add <code>get_installed_apps()</code> returning the list; <code>append_app()</code> for runtime addition.</p><h4 id="heading-1.3-extend-60configure282960-to-accept-60installed_apps60">1.3 Extend <code>configure()</code> to accept <code>installed_apps</code></h4>
+<p>Signature becomes:</p><pre>configure(databases=None, *, migration_path=None, default_database=None,
+          model_paths=None, installed_apps=None, logging_config=None)
+</pre><p><code>installed_apps</code> can be:</p><ul>
+<li>A <code>list[str]</code> — just app Python paths, paths auto-resolved relative to CWD</li>
+<li>A <code>list[AppConfig]</code> — fully specified</li>
+</ul>
+<p>When apps are configured, auto-register them with <code>AppRegistry</code> (i.e. call <code>register_app()</code> from <code>mikiorm.models.register</code>) and auto-discover their models — same mechanism that already powers <code>MigrationEngine.discover_models()</code>.</p><h4 id="heading-1.4-module-level-60configure_from_module28module_path3a-str2960">1.4 Module-level <code>configure_from_module(module_path: str)</code></h4>
+<p>New public function:</p><pre>def configure_from_module(module_path: str) -> None:
+    """Load settings from a Python module (Django style)."""
+    module = importlib.import_module(module_path)
+    configure(
+        databases=getattr(module, "DATABASES", None),
+        default_database=getattr(module, "DEFAULT_DATABASE", "default"),
+        migration_path=getattr(module, "MIGRATION_PATH", "migrations"),
+        model_paths=getattr(module, "MODEL_PATHS", None),
+        installed_apps=getattr(module, "INSTALLED_APPS", []),
+    )
+</pre><h4 id="heading-1.5-60__all__60-updates">1.5 <code>__all__</code> updates</h4>
+<p>Add <code>&quot;AppConfig&quot;</code> and <code>&quot;configure_from_module&quot;</code>.</p><h4 id="heading-1.6-template-2f-factory-for-user-facing-60settings.py60">1.6 Template / factory for user-facing <code>settings.py</code></h4>
+<p>Add a module-level function:</p><pre>def generate_settings_template(**kwargs) -> str:
+    """Produce a ready-to-edit settings.py string (called by startproject)."""
+</pre><p>The returned template contains clear section comments and placeholders:</p><pre>"""Project settings — configure your miki-orm application here."""
+
+from mikiorm import configure
+
+# ─── Database ───────────────────────────────────────────────────
+DATABASES = {
+    # "default": {
+    #     "ENGINE": "sqlite",
+    #     "NAME": BASE_DIR / "db.sqlite3",
+    # }
+}
+
+# ─── Apps ───────────────────────────────────────────────────────
+INSTALLED_APPS = [
+    # "users",
+    # "products",
+]
+
+# ─── Paths ──────────────────────────────────────────────────────
+BASE_DIR = Path(__file__).parent
+MIGRATION_PATH = "migrations"
+
+# ─── Runtime ───────────────────────────────────────────────────
+SECRET_KEY = "replace-me"
+DEBUG = False
+DEFAULT_DATABASE = "default"
+
+
+def configure_project():
+    configure(
+        databases=DATABASES,
+        default_database=DEFAULT_DATABASE,
+        migration_path=MIGRATION_PATH,
+        installed_apps=INSTALLED_APPS,
+    )
+</pre><hr />
+<h3 id="heading-2-b7-60mikiorm2fcli2fcli.py60-2014-new-60startapp60-and-60startproject60-commands">2 · <code>mikiorm/cli/cli.py</code> — New <code>startapp</code> and <code>startproject</code> commands</h3>
+<p>Add to <code>main()</code>'s subparser block <strong>before <code>args = parser.parse_args()</code></strong>:</p><pre># ── startproject ────────────────────────────────────────────────
+startproj_parser = subparsers.add_parser(
+    "startproject",
+    help="Create a new miki-orm project with a settings.py scaffold",
+)
+startproj_parser.add_argument(
+    "project_name",
+    help="Name for the project folder / settings module (e.g. 'conf')",
+)
+startproj_parser.add_argument(
+    "target_dir",
+    nargs="?",
+    default=".",
+    help="Directory to create the project in (default: current directory)",
+)
+
+# ── startapp ────────────────────────────────────────────────────
+startapp_parser = subparsers.add_parser(
+    "startapp",
+    help="Scaffold a new app with boilerplate files",
+)
+startapp_parser.add_argument(
+    "app_name",
+    help="Name for the app (used as folder and module name)",
+)
+startapp_parser.add_argument(
+    "target_dir",
+    nargs="?",
+    help="Directory to create the app in (default: current directory — creates "
+         "only app.py and models.py alongside)",
+)
+</pre><h4 id="heading-2.1-60startproject60-handler-28private-function29">2.1 <code>startproject</code> handler (private function)</h4>
+<pre>def _handle_startproject(args):
+    name = args.project_name
+    target = Path(args.target_dir).resolve()
+    project_dir = target / name
+
+    if project_dir.exists():
+        print(f"Error: '{project_dir}' already exists.", file=sys.stderr)
+        sys.exit(1)
+
+    project_dir.mkdir(parents=True, exist_ok=False)
+    settings_dir = project_dir
+    settings_file = settings_dir / "settings.py"
+
+    settings_file.write_text(
+        generate_settings_template(project_name=name)
+    )
+
+    print(f"Created project directory: {project_dir}")
+    print(f"  {settings_file.relative_to(Path.cwd())}")
+</pre><h4 id="heading-2.2-60startapp60-handler-28private-function29">2.2 <code>startapp</code> handler (private function)</h4>
+<pre>def _handle_startapp(args):
+    name = args.app_name
+    target = args.target_dir
+
+    if target:
+        # User specified a folder → create folder/app.py, folder/models.py
+        app_dir = Path(target).resolve() / name
+        app_dir.mkdir(parents=True, exist_ok=True)
+        created_pkg = True
+    else:
+        # No folder specified → create name/app.py, name/models.py (flat files)
+        cwd = Path.cwd()
+        app_dir = cwd / name          # not a package unless __init__.py added separately
+        app_dir.mkdir(exist_ok=True)
+        created_pkg = False
+
+    (app_dir / "app.py").write_text(generate_app_boilerplate(name))
+    (app_dir / "models.py").write_text(generate_models_boilerplate(name))
+
+    if created_pkg:
+        (app_dir / "__init__.py").touch()
+
+    print(f"Created app '{name}' at: {app_dir}")
+    print(f"  app.py")
+    print(f"  models.py")
+</pre><h4 id="heading-2.3-boilerplate-generators">2.3 Boilerplate generators</h4>
+<p>Add to <code>cli.py</code>:</p><pre>APP_BOILERPLATE = '''# app.py — App metadata for {name}
+from mikiorm.conf.settings import AppConfig
+
+
+class AppConfig(AppConfig):
+    """Application configuration for '{name}'."""
+    name = "{name}"
+    label = "{name}"
+'''
+
+MODELS_BOILERPLATE = '''# models.py — Database models for {name}
+from mikiorm.models import Model, CharField, IntegerField, DateTimeField
+
+
+# Register this model to the '{name}' app
+# from mikiorm.models import register
+#
+# @register(app="{name}")
+# class MyModel(Model):
+#     name = CharField(max_length=100)
+#
+#     class Meta:
+#         table_name = "{name}_mymodel"
+'''
+</pre><p>(No <code>__init__.py</code> boilerplate needed; <code>touch()</code> is sufficient.)</p><hr />
+<h3 id="heading-3-b7-60mikiorm2f__init__.py60-26-60mikiorm2fcli2f__main__.py60-2014-no-changes-required">3 · <code>mikiorm/__init__.py</code> &amp; <code>mikiorm/cli/__main__.py</code> — No changes required</h3>
+<p>The existing <code>configure_from_module = ...</code> will be re-exported from <code>mikiorm.conf.settings</code>, which is already imported in <code>mikiorm/__init__.py</code> — will need to add the new symbols.</p><hr />
+<h3 id="heading-4-b7-settings-60__all__60-26-re-exports">4 · Settings <code>__all__</code> &amp; re-exports</h3>
+<p>Update <code>mikiorm/__init__.py</code>:</p><pre>from .conf.settings import configure, configure_from_module, settings
+</pre><p>Add <code>configure_from_module</code> to <code>__all__</code>.</p><hr />
+<h2 id="heading-file-change-summary">File Change Summary</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mikiorm/conf/settings.py</code></td>
+<td>+<code>AppConfig</code> (metadata), +<code>SECRET_KEY</code>/<code>DEBUG</code>/<code>allowed_hosts</code> attrs on <code>Settings</code>, extend <code>configure()</code>, new <code>configure_from_module()</code>, new <code>generate_settings_template()</code>, update <code>__all__</code></td>
+</tr>
+<tr>
+<td><code>mikiorm/cli/cli.py</code></td>
+<td>+startproject/startapp subparsers, +<code>_handle_startproject()</code>, +<code>_handle_startapp()</code>, +<code>generate_app_boilerplate()</code>/<code>generate_models_boilerplate()</code>/<code>generate_settings_template()</code>, +command dispatch blocks</td>
+</tr>
+<tr>
+<td><code>mikiorm/__init__.py</code></td>
+<td>+re-export <code>configure_from_module</code></td>
+</tr>
+</tbody>
+</table>
+<p>No files deleted.</p><hr />
+<h2 id="heading-verifications">Verifications</h2>
+<ul>
+<li>[ ] <code>python -m mikiorm startproject conf myproject</code> → creates <code>myproject/conf/settings.py</code></li>
+<li>[ ] <code>python -m mikiorm startproject conf .</code> → creates <code>./conf/settings.py</code></li>
+<li>[ ] <code>python -m mikiorm startapp user</code> → creates <code>./user/app.py</code>, <code>./user/models.py</code></li>
+<li>[ ] <code>python -m mikiorm startapp user apps/</code> → creates <code>./apps/user/app.py</code>, <code>./apps/user/models.py</code>, <code>./apps/user/__init__.py</code></li>
+<li>[ ] Generated <code>settings.py</code> has clear commented sections for <code>DATABASES</code>, <code>INSTALLED_APPS</code>, <code>paths</code>, <code>runtime</code></li>
+<li>[ ] Existing <code>configure()</code> signature backwards-compatible (optional args all default to noop)</li>
+<li>[ ] <code>configure_from_module(&quot;myapp.settings&quot;)</code> populates <code>settings.databases</code>, <code>settings.installed_apps</code></li>
+<li>[ ] Existing CLI commands (<code>makemigrations</code>, <code>migrate</code>, etc.) still work</li>
+</ul>
+<hr />
+<h2 id="heading-additional-requirement3a-universal-model-registration-28no-decorator-needed29">Additional Requirement: Universal Model Registration (No Decorator Needed)</h2>
+<h3 id="heading-problem">Problem</h3>
+<p>Today users must annotate every model with <code>@register(app=&quot;...&quot;)</code>. This is error-prone
+and unnecessary when <code>INSTALLED_APPS</code> already declares which apps exist and where
+their <code>models.py</code> files live. The migration engine currently walks <code>model_paths</code>
+manually rather than using the central <code>AppRegistry</code>, so model discovery and
+migration are on separate code paths.</p><h3 id="heading-goal">Goal</h3>
+<ul>
+<li><strong>Zero decorators required for the common case</strong>: once an app is listed in
+<code>INSTALLED_APPS</code>, calling <code>auto_discover()</code> must find and register every
+<code>Model</code> subclass in that app’s <code>models.py</code> with the correct app namespace.</li>
+<li><strong>Single source of truth</strong>: <code>MigrationEngine</code>, <code>check</code>, and any other tool
+must share the same discovery mechanism via <code>AppRegistry</code>.</li>
+<li><strong>Security hardening</strong>: path traversal prevention, module name validation,
+and whitelist-based import guards in every public entry-point.</li>
+</ul>
+<hr />
+<h3 id="heading-d-b7-60mikiorm2fmodels2fregister.py60-2014-improved-auto-discovery-28no-decorator29">D · <code>mikiorm/models/register.py</code> — Improved auto-discovery (no decorator)</h3>
+<h4 id="heading-d.1-60appregistry.auto_discover282960-enhancements">D.1 <code>AppRegistry.auto_discover()</code> enhancements</h4>
+<p>Current implementation (line 172–204) already:</p><ol>
+<li>Iterates registered apps</li>
+<li>Imports each app’s <code>models.py</code> dynamically</li>
+<li>Registers every <code>Model</code> subclass found</li>
+</ol>
+<p><strong>What is missing / needs reinforcement:</strong></p><pre>def auto_discover(self, verbose=False):
+    # NEW: validate paths before importing
+    # NEW: whitelist-safe import — only modules inside registered app base_path
+    # NEW: log summary per-app (applied / skipped / errors)
+    # EXISTING: dynamic import of models.py via importlib
+    # EXISTING: walk sub-modules if models is a package
+</pre><p>Key additions:</p><ul>
+<li><strong>Path guard</strong>: reject modules whose resolved real-path is <em>outside</em> the
+registered <code>app_config.base_path</code> (prevents <code>../../etc/passwd</code> imports).</li>
+<li><strong>App-name sanity</strong>: pre-validate app names against <code>str.isidentifier()</code> and
+block reserved Python keywords.</li>
+<li><strong>Import safety net</strong>: wrap the dynamic <code>exec_module()</code> call in a broad
+<code>except Exception</code> that logs but does <em>not</em> crash discovery of other apps.</li>
+<li><strong>Skip-if-already-discovered flag</strong>: honour <code>app_config._discovered</code> and
+provide a <code>force=False</code> parameter for CLI re-scans.</li>
+</ul>
+<h4 id="heading-d.2-60appregistry.auto_discover_apps_from_settings282960">D.2 <code>AppRegistry.auto_discover_apps_from_settings()</code></h4>
+<p>New public convenience:</p><pre>def auto_discover_apps_from_settings(self) -> int:
+    """Convenience: register and auto-discover every INSTALLED_APPS entry."""
+    from ..conf.settings import settings
+    count = 0
+    for entry in settings.installed_apps:
+        label = getattr(entry, "label", entry.name)
+        path  = getattr(entry, "path",  None) or _resolve_app_path(entry.name)
+        try:
+            self.register_app(label, path)
+            count += self.auto_discover_app_models(label, verbose=False)
+        except Exception as exc:
+            logger.warning("Could not auto-register app %r: %s", label, exc)
+    return count
+</pre><ul>
+<li>Private helper <code>_resolve_app_path(name: str) -&gt; str</code> walks <code>sys.path</code> entries,
+then CWD, to find a matching package directory (first <code>name/__init__.py</code> match
+wins).  Falls back to <code>os.getcwd()</code> so the call never raises.</li>
+<li>All path inputs are resolved with <code>Path.resolve()</code> (no symlink resolution) and
+validated with <code>Path.is_relative_to()</code> (Python ≥ 3.9) before use.</li>
+</ul>
+<h4 id="heading-d.3-60appconfig60-in-60register.py60-2014-stays3b-leave-untouched">D.3 <code>AppConfig</code> in <code>register.py</code> — stays; leave untouched</h4>
+<p>The <code>AppConfig</code> class at the top of <code>register.py</code> is already complete.  The new
+<code>AppConfig</code> in <code>conf/settings.py</code> is a <em>metadata</em> holder for <code>INSTALLED_APPS</code>
+values and bridges into <code>register.AppConfig</code> during <code>configure()</code>.</p><hr />
+<h3 id="heading-e-b7-60mikiorm2fmigrations2fengine.py60-2014-use-60appregistry60-for-discovery">E · <code>mikiorm/migrations/engine.py</code> — Use <code>AppRegistry</code> for discovery</h3>
+<h4 id="heading-e.1-60migrationengine.discover_models282960-28line-136201316529">E.1 <code>MigrationEngine.discover_models()</code> (line 136–165)</h4>
+<p><strong>Before</strong>: walks <code>settings.model_paths</code> with <code>os.walk</code>, imports each <code>.py</code> file,
+and relies on <code>@register</code> decorators running at import-time.</p><p><strong>After</strong>: single source of truth — delegate to <code>AppRegistry</code>.</p><pre>def discover_models(self) -> None:
+    if self._discovered:
+        return
+    from ..models.register import get_default_registry, auto_discover
+    registry = get_default_registry()
+    # If settings.installed_apps is configured, register + discover them
+    if settings.installed_apps:
+        registry.auto_discover_apps_from_settings()
+    else:
+        # Fallback to legacy model_paths walk
+        auto_discover()
+    self._discovered = True
+</pre><ul>
+<li>Calls <code>auto_discover_apps_from_settings()</code> (new D.2) when <code>INSTALLED_APPS</code>
+is non-empty; falls back to <code>auto_discover()</code> when only <code>model_paths</code> is set.</li>
+<li>Both paths converge on <code>AppRegistry</code> so <code>MigrationEngine.makemigrations()</code>
+and <code>MigrationEngine.get_unapplied_migrations()</code> see the same model set.</li>
+<li><code>self._discovered</code> guard prevents repeated imports.</li>
+</ul>
+<h4 id="heading-e.2-60discover_models60-call-sites-audit-28no-functional-change29">E.2 <code>discover_models</code> call-sites audit (no functional change)</h4>
+<p>validate that each existing call-site (lines 105, 169, 225, 447, 598) still
+behaves correctly after D+E.  All call-sites are already inside <code>try/except</code> or
+followed by explicit <code>check</code> — no additional wrapping needed.</p><hr />
+<h3 id="heading-f-b7-60mikiorm2fconf2fsettings.py60-2014-security2c-validation2c-and-60installed_apps60">F · <code>mikiorm/conf/settings.py</code> — Security, validation, and <code>INSTALLED_APPS</code></h3>
+<h4 id="heading-f.1-60settings.configure_installed_apps282960-2f-60configure282960-extension">F.1 <code>Settings.configure_installed_apps()</code> / <code>configure()</code> extension</h4>
+<p>Add a dedicated helper called from <code>configure()</code>:</p><pre>def configure_installed_apps(self, apps: list) -> None:
+    """Validate and store INSTALLED_APPS entries."""
+    validated: list[AppConfig] = []
+    for entry in apps:
+        if isinstance(entry, str):
+            cfg = AppConfig(name=entry)
+        elif isinstance(entry, AppConfig):
+            cfg = entry
+        else:
+            raise TypeError(
+                f"INSTALLED_APPS entries must be str or AppConfig, got {type(entry)!r}"
+            )
+        _validate_app_name(cfg.name)            # ← security: identifier / keyword check
+        if cfg.path:
+            cfg.path = str(Path(cfg.path).resolve())  # ← security: normalise path
+            _validate_app_path(cfg.path, cfg.name)    # ← security: traversal guard
+        validated.append(cfg)
+    self.installed_apps = validated
+    # Auto-register with central AppRegistry
+    try:
+        from ..models.register import get_default_registry
+        reg = get_default_registry()
+        for cfg in validated:
+            if cfg.path and not reg.get_app(cfg.label):
+                reg.register_app(cfg.label, cfg.path)
+    except Exception as exc:
+        logger.warning("Could not auto-register apps: %s", exc)
+</pre><h4 id="heading-f.2-private-validators">F.2 Private validators</h4>
+<pre>_RESERVED_KEYWORDS = frozenset({
+    "False","None","True","and","as","assert","async","await",
+    "break","class","continue","def","del","elif","else","except",
+    "finally","for","from","global","if","import","in","is","lambda",
+    "nonlocal","not","or","pass","raise","return","try","while",
+    "with","yield",
+})
+
+def _validate_app_name(name: str) -> None:
+    if not name.isidentifier():
+        raise ValueError(f"Invalid app name {name!r}: must be a valid Python identifier")
+    if name in _RESERVED_KEYWORDS:
+        raise ValueError(f"Invalid app name {name!r}: conflicts with a Python keyword")
+
+def _validate_app_path(path: str, app_name: str) -> None:
+    """Prevent path traversal — app dir must be inside CWD or a known project root."""
+    p = Path(path).resolve()
+    cwd = Path.cwd().resolve()
+    try:
+        p.relative_to(cwd)
+    except ValueError:
+        # Permit absolute paths outside CWD only if an env-whitelist variable is set
+        allowed_root = os.getenv("MIKIORM_ALLOWED_PROJECT_ROOT", "").strip()
+        if allowed_root and p == Path(allowed_root).resolve():
+            return
+        raise ValueError(
+            f"App path for {app_name!r} ({p}) is outside the current working directory. "
+            "Set MIKIORM_ALLOWED_PROJECT_ROOT to explicitly allow it."
+        )
+</pre><h4 id="heading-f.3-60configure_from_module282960-2014-module-whitelisting">F.3 <code>configure_from_module()</code> — module whitelisting</h4>
+<pre>def configure_from_module(module_path: str) -> None:
+    """Load settings from a Python module with an explicit allowlist check."""
+    _validate_module_path(module_path)  # security: reject `__main__`, `os.*`, etc.
+    module = importlib.import_module(module_path)
+    # ... existing configure call ...
+</pre><pre>_ALLOWED_MODULE_PREFIXES = ("",)  # empty = current project only
+
+def _validate_module_path(module_path: str) -> None:
+    """Prevent importing arbitrary modules as settings."""
+    if not module_path:
+        raise ValueError("module_path must be a non-empty string")
+    parts = module_path.split(".")
+    if parts[0] in {"os", "sys", "subprocess", "importlib", "shutil", "code"}:
+        raise ValueError(
+            f"Refusing to load {module_path!r}: top-level package is disallowed for settings"
+        )
+    if module_path in {"__main__", "builtins", "builtins"}:
+        raise ValueError(f"Refusing to load {module_path!r}: reserved module name")
+</pre><hr />
+<h3 id="heading-g-b7-updated-file-change-summary">G · Updated File Change Summary</h3>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mikiorm/conf/settings.py</code></td>
+<td>+<code>AppConfig</code> metadata, +<code>SECRET_KEY/DEBUG/allowed_hosts</code>, <code>configure(installed_apps=...)</code>, <code>configure_installed_apps() helper, </code>configure_from_module()<code>, </code>generate_settings_template()<code>, private path/name/module validators, </code>Settings.installed_apps<code>/</code>Settings.append_app()<code>, </code><strong>all</strong>` updates</td>
+</tr>
+<tr>
+<td><code>mikiorm/models/register.py</code></td>
+<td>Harden <code>auto_discover()</code>: path guards, module whitelist, force-rescan flag, better logging; new <code>auto_discover_apps_from_settings()</code>; new <code>_resolve_app_path()</code></td>
+</tr>
+<tr>
+<td><code>mikiorm/migrations/engine.py</code></td>
+<td><code>discover_models()</code> routes through <code>AppRegistry</code> when <code>INSTALLED_APPS</code> set; fallback to legacy <code>model_paths</code></td>
+</tr>
+<tr>
+<td><code>mikiorm/cli/cli.py</code></td>
+<td><code>startproject</code> / <code>startapp</code> subparsers, <code>_handle_startproject()</code>, <code>_handle_startapp()</code>, boilerplate generators, dispatch</td>
+</tr>
+<tr>
+<td><code>mikiorm/__init__.py</code></td>
+<td>Re-export <code>configure_from_module</code></td>
+</tr>
+</tbody>
+</table>
+<p>No files deleted.</p><hr />
+<h3 id="heading-h-b7-updated-verifications">H · Updated Verifications</h3>
+<p>Add to existing clauses:</p><ul>
+<li>[ ] <code>INSTALLED_APPS = [&quot;users&quot;]</code> + <code>configure(installed_apps=INSTALLED_APPS)</code> registers <code>users</code> app and auto-discovers <code>users/models.py</code> Models</li>
+<li>[ ] No <code>@register</code> decorator needed when <code>INSTALLED_APPS</code> is populated</li>
+<li>[ ] <code>auto_discover_apps_from_settings()</code> returns count of all models in all installed apps</li>
+<li>[ ] Path traversal attempt (<code>../../etc</code>) in an <code>INSTALLED_APPS</code> entry raises <code>ValueError</code></li>
+<li>[ ] <code>_validate_module_path(&quot;os.path&quot;)</code> raises <code>ValueError</code> on <code>configure_from_module()</code></li>
+<li>[ ] <code>MigrationEngine.discover_models()</code> uses <code>AppRegistry</code> when <code>INSTALLED_APPS</code> set</li>
+<li>[ ] <code>MigrationEngine.makemigrations()</code> produces same results as before (regression check)</li>
+<li>[ ] Reserved keyword app name (e.g. <code>class</code>) rejected by <code>_validate_app_name()</code></li>
+</ul>
+<hr />
+
+
+</body>
+</html>

@@ -217,7 +217,8 @@ class ForwardForeignKeyDescriptor:
     def _resolve_related_model(self) -> type[Any]:
         target = self.field.to
         if isinstance(target, str):
-            from ..models.registry import ModelRegistry
+            from ..models.register import ModelRegistry
+
             model = ModelRegistry.get_model(target)
             if model is None:
                 raise LookupError(f"Related model '{target}' not registered")

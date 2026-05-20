@@ -135,7 +135,7 @@ class DeadlockRetryPolicy:
             True if appears to be deadlock-related
         """
         error_str = str(error).lower()
-        return any(key in error_str for key in DeadlockRetryPolicy.DEADLOCK_ERRORS)
+        return any(key.lower() in error_str for key in DeadlockRetryPolicy.DEADLOCK_ERRORS)
     
     @staticmethod
     def get_backoff_ms(attempt: int) -> int:

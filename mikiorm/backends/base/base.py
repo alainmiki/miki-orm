@@ -21,7 +21,7 @@ from .adapter import (
     BaseConnection,
     get_param_placeholder,
 )
-from .dialect import Dialect, SafeBuilder, get_safe_builder
+from .dialect import Dialect, SafeBuilder, QueryBuilder, get_safe_builder
 from .pool import (
     AsyncConnectionPool,
     PooledAsyncConnection,
@@ -125,5 +125,6 @@ __all__ = [
     # dialect
     "Dialect",
     "SafeBuilder",
+    "QueryBuilder",
     "get_safe_builder",
 ]

@@ -17,7 +17,7 @@ import time
 from unittest.mock import Mock, MagicMock, patch
 from datetime import datetime, timedelta
 
-from mikiorm.db_pool import (
+from mikiorm.backends.base.pool import (
     ConnectionState,
     PoolStatistics,
     ConnectionMetadata,
@@ -25,7 +25,6 @@ from mikiorm.db_pool import (
     ConnectionPool,
     QueryExecutor,
 )
-
 
 class TestPoolStatistics:
     """Tests for PoolStatistics dataclass."""
@@ -159,7 +158,7 @@ class TestDeadlockRetryPolicy:
 
 class TestConnectionPool:
     """Tests for connection pool."""
-    
+
     def test_pool_initialization(self):
         """Test pool initialization."""
         factory = Mock()
@@ -174,133 +173,133 @@ class TestConnectionPool:
         assert pool.max_size == 10
         assert pool.timeout == 30
         assert pool.idle_timeout == 900
-    
+
     def test_acquire_creates_connection(self):
         """Test acquiring a connection."""
         conn = Mock()
         factory = Mock(return_value=conn)
         pool = ConnectionPool(factory, max_size=5)
-        
+
         acquired = pool.acquire(timeout=5)
         assert acquired is conn
         assert factory.called
-    
+
     def test_acquire_reuses_available(self):
         """Test reusing available connection."""
         conn1 = Mock()
         conn2 = Mock()
         factory = Mock(side_effect=[conn1, conn2])
         pool = ConnectionPool(factory, max_size=5)
-        
+
         # Acquire first connection
         c1 = pool.acquire(timeout=5)
         assert c1 is conn1
-        
+
         # Release it
         pool.release(c1)
-        
+
         # Acquire again - should reuse
         c1_again = pool.acquire(timeout=5)
         assert c1_again is conn1
-        
+
         # Factory should only be called once
         assert factory.call_count == 1
-    
+
     def test_acquire_timeout(self):
         """Test acquisition timeout."""
         factory = Mock()
         pool = ConnectionPool(factory, max_size=1, timeout=0.1)
-        
+
         # Acquire the only available connection
         conn = pool.acquire(timeout=1)
-        
+
         # Try to acquire another - should timeout
         with pytest.raises(TimeoutError):
             pool.acquire(timeout=0.1)
-    
+
     def test_release_unhealthy_discards(self):
         """Test releasing unhealthy connection discards it."""
         conn = Mock()
         conn.ping = Mock(side_effect=Exception("Connection lost"))
         factory = Mock(return_value=conn)
         pool = ConnectionPool(factory, max_size=5)
-        
+
         conn_acquired = pool.acquire(timeout=5)
-        
+
         # Mock health check to fail
         with patch.object(pool, '_is_connection_healthy', return_value=False):
             pool.release(conn_acquired)
-        
+
         # Verify stats
         stats = pool.get_statistics()
         assert stats.active_connections == 0
         assert stats.idle_connections == 0
-    
+
     def test_cleanup_stale_connections(self):
         """Test stale connection cleanup."""
         conns = [Mock() for _ in range(3)]
         factory = Mock(side_effect=conns)
         pool = ConnectionPool(factory, max_size=10, idle_timeout=0)
-        
-        # Acquire and release connections
-        for conn in conns:
-            c = pool.acquire(timeout=5)
-            pool.release(c)
-        
-        # All should be idle
+
+        # Acquire multiple connections and then release them
+        acquired_connections = [pool.acquire(timeout=5) for _ in conns]
+        for conn in acquired_connections:
+            pool.release(conn)
+
+        # All three should now be idle
         assert len(pool._available) == 3
-        
+
         # Cleanup stale
         with patch.object(pool, '_is_connection_healthy', return_value=True):
             pool._cleanup_stale_connections()
-        
+
         # All marked as stale with timeout=0 should be removed
         assert len(pool._available) == 0
-    
+
     def test_get_statistics(self):
         """Test pool statistics."""
         conn1 = Mock()
         conn2 = Mock()
         factory = Mock(side_effect=[conn1, conn2])
         pool = ConnectionPool(factory, max_size=10)
-        
+
         c1 = pool.acquire(timeout=5)
         c2 = pool.acquire(timeout=5)
-        
+
         stats = pool.get_statistics()
         assert stats.total_connections == 2
         assert stats.active_connections == 2
         assert stats.idle_connections == 0
-        
+
         pool.release(c1)
-        
+
         stats = pool.get_statistics()
         assert stats.active_connections == 1
         assert stats.idle_connections == 1
-    
+
     def test_close_all(self):
         """Test closing all connections."""
         conn1 = Mock()
         conn2 = Mock()
         factory = Mock(side_effect=[conn1, conn2])
         pool = ConnectionPool(factory, max_size=10)
-        
+
         c1 = pool.acquire(timeout=5)
         c2 = pool.acquire(timeout=5)
         pool.release(c1)
-        
+
         pool.close_all()
-        
+
         assert conn1.close.called
         assert conn2.close.called
         assert len(pool._available) == 0
         assert len(pool._in_use) == 0
-    
+
     def test_thread_safety(self):
         """Test thread-safe concurrent access."""
         acquired = []
         errors = []
-        
+
         def acquire_and_release():
             try:
                 conn = Mock()
@@ -311,13 +310,13 @@ class TestConnectionPool:
                 pool.release(c)
             except Exception as e:
                 errors.append(e)
-        
+
         threads = [threading.Thread(target=acquire_and_release) for _ in range(10)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
-        
+
         assert len(errors) == 0
 
 

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .schema import get_introspector
 from ..backends.base.dialect import get_safe_builder
-from ..models.registry import ModelRegistry
+from ..models.register import ModelRegistry
 from ..models.fields import (
     AutoField, BigAutoField, SmallAutoField,
     IntegerField, BigIntegerField, SmallIntegerField,
@@ -113,11 +113,11 @@ class SchemaDiffGenerator:
                 return added_field_name
         return None
 
-    def generate_diff(self) -> List[Any]:
+    def generate_diff(self, model_classes: List[type[Any]] | None = None) -> List[Any]:
         """Compare registered models to DB schema and return list of operations.
 
         Args:
-            app_labels: Optional list of model names to filter by.
+            model_classes: Specific models to diff. Defaults to all in Registry.
         """
         from .operations import (
             CreateTable,
@@ -132,7 +132,7 @@ class SchemaDiffGenerator:
 
         ops = []
         db_schema = self._get_db_schema()
-        model_classes = ModelRegistry.all_models()
+        model_classes = model_classes or ModelRegistry.all_models()
 
         if not model_classes:
             logger.debug("No models found in Registry during diff.")
@@ -293,9 +293,8 @@ class SchemaDiffGenerator:
 
 
 def generate_migration_operations(
-    connection: Any, engine: str, app_labels: list[str] | None = None
+    connection: Any, engine: str, model_classes: list[type[Any]] | None = None
 ) -> List[Any]:
     """Convenience function: return list of migration operations needed."""
     gen = SchemaDiffGenerator(connection, engine)
-    gen.app_labels = app_labels  # Pass app_labels to the generator
-    return gen.generate_diff()
+    return gen.generate_diff(model_classes=model_classes)

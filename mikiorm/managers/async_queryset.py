@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Any, AsyncIterator
 
 from ..models.base import Model, ObjectDoesNotExist, MultipleObjectsReturned
-from ..query.builder import QueryBuilder
+from ..query import QueryBuilder
 from ..backends.base.dialect import get_safe_builder
-from ..settings import settings
+from ..conf.settings import settings
 
 
 class AsyncQuerySet:
@@ -234,7 +234,10 @@ class AsyncQuerySet:
         return "", []
 
     def _build_sql(self) -> tuple[str, list[Any]]:
-        builder = QueryBuilder(self.model)
+        db_config = settings.databases.get("default")
+        engine = db_config.engine if db_config else "sqlite"
+        safe_builder = get_safe_builder(engine)
+        builder = QueryBuilder(self.model, safe_builder)
         return builder.build(self)
 
     def _row_to_model(self, row: Any) -> Model:

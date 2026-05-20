@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Optional, Tuple
 
-from mikiorm.query.safe_builder import SafeBuilder
+from mikiorm.query import SafeBuilder
 
 
 class DatabaseOperations:

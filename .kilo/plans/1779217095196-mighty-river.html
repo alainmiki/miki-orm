@@ -1,0 +1,185 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <title>Converted from: 1779217095196-mighty-river.md</title>
+    <meta charset="utf-8"/>
+
+</head>
+<body>
+
+<h1 id="heading-plan3a-django-like-project-structure-and-cli-app-creation">Plan: Django-like Project Structure and CLI App Creation</h1>
+<h2 id="heading-overview">Overview</h2>
+<p>Implement a Django-inspired project structure for miki-orm with:</p><ol>
+<li>A standardized <code>settings.py</code> configuration pattern</li>
+<li>CLI command <code>startproject</code> to create new projects</li>
+<li>CLI command <code>startapp</code> to create new apps with boilerplate code</li>
+</ol>
+<h2 id="heading-command-behavior-28updated-per-requirements29">Command Behavior (Updated per requirements)</h2>
+<h3 id="heading-60startapp60-command-variants"><code>startapp</code> Command Variants</h3>
+<ul>
+<li><code>miki-orm startapp users</code> - Creates <code>users/models.py</code> and <code>users/app.py</code> in current directory (flat structure)</li>
+<li><code>miki-orm startapp users myapp</code> - Creates <code>myapp/users/models.py</code> and <code>myapp/users/app.py</code> (nested in folder)</li>
+</ul>
+<h3 id="heading-60startproject60-command-variants"><code>startproject</code> Command Variants</h3>
+<ul>
+<li><code>miki-orm startproject conf .</code> - Creates project in <strong>current directory</strong> with settings in <code>conf/settings.py</code></li>
+<li><code>miki-orm startproject conf myproject</code> - Creates project in <code>myproject/</code> directory with <code>myproject/conf/settings.py</code></li>
+</ul>
+<h2 id="heading-current-state-analysis">Current State Analysis</h2>
+<h3 id="heading-existing-components">Existing Components</h3>
+<ul>
+<li><strong><code>mikiorm/conf/settings.py</code></strong>: Already has <code>Settings</code>, <code>DatabaseConfig</code>, and <code>configure()</code> function</li>
+<li><strong><code>mikiorm/models/register.py</code></strong>: Has <code>AppRegistry</code>, <code>AppConfig</code>, and <code>@register</code> decorator for app-based model registration</li>
+<li><strong><code>mikiorm/cli/cli.py</code></strong>: Unified CLI with commands for migrations, database operations</li>
+</ul>
+<h3 id="heading-missing-components">Missing Components</h3>
+<ul>
+<li>No <code>INSTALLED_APPS</code> concept in settings</li>
+<li>No <code>startproject</code> CLI command</li>
+<li>No <code>startapp</code> CLI command</li>
+<li>No standardized project template structure</li>
+</ul>
+<h2 id="heading-proposed-implementation">Proposed Implementation</h2>
+<h3 id="heading-1.-enhanced-settings-structure">1. Enhanced Settings Structure</h3>
+<p>Add <code>INSTALLED_APPS</code> support to the <code>Settings</code> class:</p><pre># New in mikiorm/conf/settings.py
+class Settings:
+    def __init__(self):
+        self.INSTALLED_APPS = []  # List of app module paths
+        self.DATABASES = {}     # Django-style database config
+        # ... existing fields
+
+    def configure_apps(self, app_modules: List[str]) -> None:
+        """Configure installed apps by importing and registering them."""
+        for app_module in app_modules:
+            try:
+                module = importlib.import_module(app_module)
+                if hasattr(module, 'default_app_config'):
+                    # Use AppConfig from module
+                    app_config = module.default_app_config
+                # Auto-discover models in the app
+            except ImportError:
+                logger.warning(f"Could not import app: {app_module}")
+</pre><h3 id="heading-2.-project-template-structure">2. Project Template Structure</h3>
+<pre>myproject/
+├── myproject/
+│   ├── __init__.py
+│   ├── settings.py        # Main settings file
+│   ├── urls.py            # URL routing (future)
+│   └── wsgi.py            # WSGI entry (future)
+├── apps/
+│   ├── __init__.py
+│   └── users/             # Example app
+│       ├── __init__.py
+│       ├── app.py         # AppConfig definition  
+│       └── models.py      # Model definitions
+├── migrations/            # Global migrations
+├── manage.py              # CLI entry point
+└── requirements.txt
+</pre><h3 id="heading-3.-cli-commands-to-add">3. CLI Commands to Add</h3>
+<h4 id="heading-60startproject60-command"><code>startproject</code> Command</h4>
+<p>Usage: <code>miki-orm startproject myproject</code></p><p>Creates:</p><ul>
+<li>Project directory structure</li>
+<li><code>settings.py</code> with template configuration</li>
+<li><code>manage.py</code> entry point</li>
+</ul>
+<h4 id="heading-60startapp60-command"><code>startapp</code> Command</h4>
+<p>Usage: <code>miki-orm startapp users</code></p><p>Creates:</p><ul>
+<li><code>apps/users/__init__.py</code></li>
+<li><code>apps/users/app.py</code> with <code>AppConfig</code> class</li>
+<li><code>apps/users/models.py</code> with base imports</li>
+</ul>
+<h3 id="heading-4.-boilerplate-code-templates">4. Boilerplate Code Templates</h3>
+<h4 id="heading-60settings.py60-template"><code>settings.py</code> Template</h4>
+<pre>"""Miki-ORM project settings."""
+from mikiorm.conf import configure
+
+# Database configuration
+DATABASES = {
+    "default": {
+        "ENGINE": "sqlite",
+        "NAME": "db.sqlite3",
+    }
+}
+
+# Installed applications
+INSTALLED_APPS = [
+    "apps.users",
+]
+
+# Initialize ORM
+configure(
+    databases=DATABASES,
+    model_paths=["apps"],
+)
+</pre><h4 id="heading-60app.py60-template-28appconfig29"><code>app.py</code> Template (AppConfig)</h4>
+<pre>"""App configuration for users app."""
+from mikiorm.models.register import AppConfig
+
+class UsersAppConfig(AppConfig):
+    """Configuration for the users application."""
+    name = "users"
+    verbose_name = "Users"
+    
+    def ready(self):
+        """Called when app is fully loaded."""
+        pass
+
+default_app_config = UsersAppConfig
+</pre><h2 id="heading-files-to-modify2fcreate">Files to Modify/Create</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Action</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mikiorm/conf/settings.py</code></td>
+<td>Modify</td>
+<td>Add <code>INSTALLED_APPS</code> support</td>
+</tr>
+<tr>
+<td><code>mikiorm/cli/cli.py</code></td>
+<td>Modify</td>
+<td>Add <code>startproject</code> and <code>startapp</code> commands</td>
+</tr>
+<tr>
+<td><code>mikiorm/cli/templates.py</code></td>
+<td>Create</td>
+<td>Template constants for generated files</td>
+</tr>
+</tbody>
+</table>
+<h2 id="heading-implementation-steps">Implementation Steps</h2>
+<ol>
+<li><p><strong>Phase 1: Update Settings</strong></p><ul>
+<li>Add <code>INSTALLED_APPS</code> to <code>Settings</code> class</li>
+<li>Add <code>configure_apps()</code> method</li>
+<li>Update <code>__init__.py</code> exports</li>
+</ul>
+</li>
+<li><p><strong>Phase 2: Add CLI Commands</strong></p><ul>
+<li>Add <code>startproject</code> command with project template</li>
+<li>Add <code>startapp</code> command with app template</li>
+<li>Create template strings for generated files</li>
+</ul>
+</li>
+<li><p><strong>Phase 3: Documentation</strong></p><ul>
+<li>Update docstrings and examples</li>
+<li>Add usage examples</li>
+</ul>
+</li>
+</ol>
+<h2 id="heading-questions-for-clarification">Questions for Clarification</h2>
+<ol>
+<li>Should <code>INSTALLED_APPS</code> support both string module paths (like Django) and <code>AppConfig</code> instances?</li>
+<li>Should the <code>startproject</code> command create a virtual environment?</li>
+<li>Should there be a <code>--template</code> option for custom project templates?</li>
+<li>Do you want migration directories per-app or global only?</li>
+</ol>
+
+
+</body>
+</html>

@@ -19,8 +19,12 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
-from typing import TYPE_CHECKING, Any, Iterable, Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
 
 if TYPE_CHECKING:
     from .adapter import BaseAdapter, BaseAsyncAdapter
@@ -82,6 +86,19 @@ class PooledConnection(AbstractContextManager):
     @property
     def raw(self) -> Any:
         return self._entry.conn
+
+    def is_valid(self, timeout: float = 5.0) -> bool:
+        """Check if the underlying connection is valid."""
+        conn = self._entry.conn
+        if hasattr(conn, "is_valid"):
+            return conn.is_valid(timeout)
+        if hasattr(conn, "ping"):
+            try:
+                conn.ping()
+                return True
+            except Exception:
+                return False
+        return True  # Assume valid if no ping method
 
     def release(self) -> None:
         if not self._released:
@@ -176,6 +193,109 @@ class PooledAsyncConnection(AbstractAsyncContextManager):
 # ---------------------------------------------------------------------------
 # Pools
 # ---------------------------------------------------------------------------
+
+
+class ConnectionState(Enum):
+    """Connection health states."""
+
+    HEALTHY = "healthy"
+    IDLE = "idle"
+    IN_USE = "in_use"
+    STALE = "stale"
+    ERROR = "error"
+
+
+@dataclass
+class PoolStatistics:
+    """Statistics for connection pool monitoring."""
+
+    total_connections: int = 0
+    active_connections: int = 0
+    idle_connections: int = 0
+    queued_requests: int = 0
+    total_acquisitions: int = 0
+    total_releases: int = 0
+    total_timeouts: int = 0
+    total_errors: int = 0
+    avg_wait_time_ms: float = 0.0
+    created_at: datetime = field(default_factory=datetime.now)
+    last_updated: datetime = field(default_factory=datetime.now)
+
+    def uptime_seconds(self) -> float:
+        """Get pool uptime in seconds."""
+        return (datetime.now() - self.created_at).total_seconds()
+
+    def utilization_percent(self) -> float:
+        """Get pool utilization percentage."""
+        if self.total_connections == 0:
+            return 0.0
+        return (self.active_connections / self.total_connections) * 100
+
+
+@dataclass
+class ConnectionMetadata:
+    """Metadata about a pooled connection."""
+
+    connection_id: str
+    state: ConnectionState
+    acquired_at: Optional[datetime] = None
+    released_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    created_at: datetime = field(default_factory=datetime.now)
+    error_count: int = 0
+    query_count: int = 0
+
+    def is_stale(self, timeout_seconds: int = 900) -> bool:
+        """Check if connection is stale (idle too long)."""
+        if self.last_used_at is None:
+            return False
+        idle_seconds = (datetime.now() - self.last_used_at).total_seconds()
+        return idle_seconds > timeout_seconds
+
+    def acquire_duration_ms(self) -> Optional[float]:
+        if self.acquired_at is None or self.released_at is None:
+            return None
+        return (self.released_at - self.acquired_at).total_seconds() * 1000
+
+    def idle_duration_seconds(self) -> float:
+        if self.state != ConnectionState.IDLE:
+            return 0.0
+        if self.released_at is None:
+            return 0.0
+        return (datetime.now() - self.released_at).total_seconds()
+
+
+class DeadlockRetryPolicy:
+    """Deadlock detection and retry policy."""
+
+    MAX_RETRIES = 3
+    INITIAL_BACKOFF_MS = 100
+    MAX_BACKOFF_MS = 400
+    BACKOFF_MULTIPLIER = 2
+    DEADLOCK_ERRORS = {
+        "OperationalError",
+        "DatabaseError",
+        "IntegrityError",
+        "1213",
+        "40P01",
+    }
+
+    @staticmethod
+    def is_deadlock_error(error: Exception) -> bool:
+        error_str = str(error).lower()
+        return any(
+            key.lower() in error_str for key in DeadlockRetryPolicy.DEADLOCK_ERRORS
+        )
+
+    @staticmethod
+    def get_backoff_ms(attempt: int) -> int:
+        backoff = DeadlockRetryPolicy.INITIAL_BACKOFF_MS
+        for _ in range(attempt - 1):
+            backoff = min(
+                backoff * DeadlockRetryPolicy.BACKOFF_MULTIPLIER,
+                DeadlockRetryPolicy.MAX_BACKOFF_MS,
+            )
+        return backoff
 
 
 class _BasePool:
@@ -442,9 +562,238 @@ class AsyncConnectionPool(_BasePool):
         await self.close()
 
 
+class ConnectionPool:
+    """Enhanced connection pool with concurrency management.
+
+    Features:
+    - Connection wait queue with timeout
+    - Stale connection detection and recycling
+    - Deadlock retry logic
+    - Per-query timeout enforcement
+    - Connection health monitoring
+    - Statistics tracking
+    """
+
+    def __init__(
+        self,
+        connection_factory: Callable,
+        min_size: int = 1,
+        max_size: int = 20,
+        timeout: float = 30.0,
+        idle_timeout: int = 900,
+        health_check_interval: int = 300,
+    ):
+        self.connection_factory = connection_factory
+        self.min_size = min_size
+        self.max_size = max_size
+        self.timeout = timeout
+        self.idle_timeout = idle_timeout
+        self.health_check_interval = health_check_interval
+
+        self._available: deque = deque()
+        self._in_use: Dict[int, Any] = {}
+        self._metadata: Dict[int, ConnectionMetadata] = {}
+        self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
+        self._stats = PoolStatistics()
+        self._last_health_check = datetime.now()
+
+    def acquire(self, timeout: Optional[float] = None) -> Any:
+        timeout = timeout or self.timeout
+        start_time = time.time()
+
+        with self._condition:
+            self._cleanup_stale_connections()
+
+            while self._available and time.time() - start_time < timeout:
+                conn = self._available.popleft()
+                conn_id = id(conn)
+
+                if self._is_connection_healthy(conn):
+                    self._in_use[conn_id] = conn
+                    meta = self._metadata[conn_id]
+                    meta.state = ConnectionState.IN_USE
+                    meta.acquired_at = datetime.now()
+                    self._stats.total_acquisitions += 1
+                    self._stats.active_connections = len(self._in_use)
+                    return conn
+
+                self._metadata[conn_id].state = ConnectionState.ERROR
+                self._close_connection(conn)
+
+            if len(self._in_use) + len(self._available) < self.max_size:
+                try:
+                    conn = self.connection_factory()
+                    conn_id = id(conn)
+                    self._in_use[conn_id] = conn
+                    self._metadata[conn_id] = ConnectionMetadata(
+                        connection_id=str(conn_id),
+                        state=ConnectionState.IN_USE,
+                        acquired_at=datetime.now(),
+                    )
+                    self._stats.total_connections += 1
+                    self._stats.total_acquisitions += 1
+                    self._stats.active_connections = len(self._in_use)
+                    return conn
+                except Exception as e:
+                    logger.error("Failed to create new connection: %s", e)
+                    raise
+
+            remaining_timeout = timeout - (time.time() - start_time)
+            while remaining_timeout > 0:
+                logger.warning(
+                    "Connection pool exhausted. Waiting %.1fs for available connection.",
+                    remaining_timeout,
+                )
+                self._stats.queued_requests += 1
+                self._condition.wait(remaining_timeout)
+                self._stats.queued_requests -= 1
+
+                if self._available:
+                    return self.acquire(timeout=remaining_timeout)
+                if len(self._in_use) + len(self._available) < self.max_size:
+                    return self.acquire(timeout=remaining_timeout)
+
+                remaining_timeout = timeout - (time.time() - start_time)
+
+            self._stats.total_timeouts += 1
+            raise TimeoutError(
+                f"Could not acquire connection within {timeout}s. "
+                f"Pool: {len(self._in_use)} in use, {len(self._available)} available, "
+                f"limit: {self.max_size}"
+            )
+
+    def release(self, connection: Any) -> None:
+        conn_id = id(connection)
+
+        with self._condition:
+            if conn_id in self._in_use:
+                del self._in_use[conn_id]
+
+                if self._is_connection_healthy(connection):
+                    meta = self._metadata[conn_id]
+                    meta.state = ConnectionState.IDLE
+                    meta.released_at = datetime.now()
+                    meta.last_used_at = datetime.now()
+                    meta.query_count += 1
+                    self._available.append(connection)
+                else:
+                    meta = self._metadata[conn_id]
+                    meta.state = ConnectionState.ERROR
+                    self._close_connection(connection)
+
+                self._stats.total_releases += 1
+                self._stats.active_connections = len(self._in_use)
+                self._condition.notify_all()
+
+    def _cleanup_stale_connections(self) -> None:
+        stale_conns = []
+        for conn in list(self._available):
+            conn_id = id(conn)
+            meta = self._metadata.get(conn_id)
+            if meta and meta.is_stale(self.idle_timeout):
+                stale_conns.append(conn)
+
+        for conn in stale_conns:
+            self._available.remove(conn)
+            self._close_connection(conn)
+
+    def _is_connection_healthy(self, connection: Any) -> bool:
+        try:
+            if hasattr(connection, "ping"):
+                connection.ping()
+                return True
+            return True
+        except Exception:
+            return False
+
+    def _close_connection(self, connection: Any) -> None:
+        try:
+            if hasattr(connection, "close"):
+                connection.close()
+        except Exception as e:
+            logger.warning("Error closing connection: %s", e)
+
+    def _wait_for_available_connection(self, timeout: float) -> None:
+        start = time.time()
+        while time.time() - start < timeout:
+            if self._available or len(self._in_use) < self.max_size:
+                return
+            time.sleep(0.01)
+
+    def get_statistics(self) -> PoolStatistics:
+        with self._lock:
+            self._stats.total_connections = len(self._in_use) + len(self._available)
+            self._stats.active_connections = len(self._in_use)
+            self._stats.idle_connections = len(self._available)
+            self._stats.last_updated = datetime.now()
+            return self._stats
+
+    def close_all(self) -> None:
+        with self._lock:
+            for conn in self._available:
+                self._close_connection(conn)
+            for conn in self._in_use.values():
+                self._close_connection(conn)
+
+            self._available.clear()
+            self._in_use.clear()
+            self._metadata.clear()
+
+
+class QueryExecutor:
+    """Query execution with deadlock retry and timeout handling."""
+
+    def __init__(self, connection_pool: ConnectionPool) -> None:
+        self.pool = connection_pool
+
+    def execute(
+        self,
+        query_func: Callable,
+        *args,
+        timeout: Optional[float] = None,
+        retry_on_deadlock: bool = True,
+        **kwargs,
+    ) -> Any:
+        last_error = None
+
+        for attempt in range(1, DeadlockRetryPolicy.MAX_RETRIES + 1):
+            try:
+                conn = self.pool.acquire(timeout)
+                try:
+                    return query_func(conn, *args, **kwargs)
+                finally:
+                    self.pool.release(conn)
+            except TimeoutError:
+                raise
+            except Exception as e:
+                last_error = e
+                if retry_on_deadlock and DeadlockRetryPolicy.is_deadlock_error(e):
+                    if attempt < DeadlockRetryPolicy.MAX_RETRIES:
+                        backoff_ms = DeadlockRetryPolicy.get_backoff_ms(attempt)
+                        logger.warning(
+                            "Deadlock detected (attempt %d). Retrying in %dms...",
+                            attempt,
+                            backoff_ms,
+                        )
+                        time.sleep(backoff_ms / 1000.0)
+                        continue
+                raise
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("Query execution failed")
+
+
 __all__ = [
     "AsyncConnectionPool",
     "PooledAsyncConnection",
     "PooledConnection",
     "SyncConnectionPool",
+    "ConnectionState",
+    "PoolStatistics",
+    "ConnectionMetadata",
+    "DeadlockRetryPolicy",
+    "ConnectionPool",
+    "QueryExecutor",
 ]

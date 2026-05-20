@@ -41,6 +41,14 @@ class SQLiteConnection(BaseConnection):
     def close(self) -> None:
         self._conn.close()
 
+    def is_valid(self, timeout: float = 5.0) -> bool:
+        """Check if the connection is valid."""
+        try:
+            self.execute("SELECT 1", ())
+            return True
+        except Exception:
+            return False
+
 
 class SQLiteAdapter(BaseAdapter):
     """SQLite adapter for creating connections and pools."""

@@ -51,7 +51,7 @@ def configure():
 # Model definitions
 # ---------------------------------------------------------------------------
 
-@register(app_label="blog")
+@register(app="blog")
 class Author(models.Model):
     """Represents a blog author."""
     name = models.CharField(max_length=100)
@@ -65,7 +65,7 @@ class Author(models.Model):
         ordering = ["name"]
 
 
-@register
+@register(app='blog')
 class Category(models.Model):
     """Blog post categories (e.g. 'Technology', 'Lifestyle')."""
     name = models.CharField(max_length=50)
@@ -76,7 +76,7 @@ class Category(models.Model):
         table_name = "categories"
 
 
-@register
+@register('blog')
 class Post(models.Model):
     """A blog post with rich field types."""
     title = models.CharField(max_length=200)

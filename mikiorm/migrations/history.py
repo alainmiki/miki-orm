@@ -8,11 +8,31 @@ from typing import Any
 
 class MigrationHistory:
     @staticmethod
-    def load_history(migrations_path: str) -> list[str]:
-        path = Path(migrations_path)
-        if not path.exists():
-            return []
-        return [p.name for p in sorted(path.iterdir()) if p.is_file()]
+    def load_history(
+        migrations_locations: (
+            str | Path | list[str] | list[Path] | list[tuple[str | None, Path]]
+        ),
+    ) -> list[str]:
+        if not isinstance(migrations_locations, (list, tuple)):
+            migrations_locations = [migrations_locations]
+
+        entries: list[tuple[str, str, str]] = []
+        for item in migrations_locations:
+            if isinstance(item, tuple):
+                prefix, path = item
+            else:
+                prefix = None
+                path = Path(item)
+
+            if not path.exists():
+                continue
+
+            for p in sorted(path.iterdir()):
+                if p.is_file() and p.suffix == ".py" and p.name != "__init__.py":
+                    name = p.name if prefix is None else f"{prefix}/{p.name}"
+                    entries.append((prefix or "", p.name, name))
+
+        return [name for _, _, name in sorted(entries)]
 
     @staticmethod
     def record_migration(migrations_path: str, name: str) -> None:

@@ -17,9 +17,11 @@ definitions) are inlined.
 from __future__ import annotations
 
 import re
+import logging
 from enum import Enum
 from typing import Any
 
+logger = logging.getLogger(__name__)
 
 # Identifiers must be word characters only.  This guards against header
 # injection should a malicious caller pass a crafted field name in a lookup.
@@ -106,6 +108,12 @@ class SafeBuilder:
 
     def quote_column(self, column: str) -> str:
         return self.quote_identifier(column)
+
+    def get_placeholder(self, index: int | None = None) -> str:
+        """Returns the appropriate parameter placeholder."""
+        if self.dialect == Dialect.POSTGRESQL and index is not None:
+            return f"${index}"
+        return self.param_placeholder
 
     # ------------------------------------------------------------------
     # Lookup translation
@@ -286,9 +294,132 @@ class SafeBuilder:
         return "ORDER BY " + ", ".join(parts) if parts else ""
 
 
+class QueryBuilder:
+    """
+    Builds SQL strings from QuerySet definitions using the safe dialect builder.
+    """
+
+    def __init__(self, model: type[Any], builder: SafeBuilder) -> None:
+        self.model = model
+        self.builder = builder
+
+    def build_insert(self, fields: list[str]) -> str:
+        """Build a safe INSERT query."""
+        table = (
+            getattr(self.model._meta, "table_name", None)
+            or self.model.__name__.lower() + "s"
+        )
+        quoted_table = self.builder.quote_table(table)
+        quoted_fields = [self.builder.quote_column(f) for f in fields]
+        placeholders = [self.builder.get_placeholder(i + 1) for i in range(len(fields))]
+
+        sql = (
+            f"INSERT INTO {quoted_table} ({', '.join(quoted_fields)}) "
+            f"VALUES ({', '.join(placeholders)})"
+        )
+        logger.debug(f"Built insert query: {sql}")
+        return sql
+
+    def build_update(self, fields: list[str], where: str | None = None) -> str:
+        """Build a safe UPDATE query."""
+        table = (
+            getattr(self.model._meta, "table_name", None)
+            or self.model.__name__.lower() + "s"
+        )
+        quoted_table = self.builder.quote_table(table)
+
+        set_parts = []
+        for i, field in enumerate(fields):
+            quoted_field = self.builder.quote_column(field)
+            placeholder = self.builder.get_placeholder(i + 1)
+            set_parts.append(f"{quoted_field} = {placeholder}")
+
+        sql = f"UPDATE {quoted_table} SET {', '.join(set_parts)}"
+        if where:
+            sql += where
+        logger.debug(f"Built update query: {sql}")
+        return sql
+
+    def build(
+        self, queryset: Any, connection: Any = None
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Build a safe SELECT query from a QuerySet."""
+        table = (
+            getattr(self.model._meta, "table_name", None)
+            or self.model.__name__.lower() + "s"
+        )
+        quoted_table = self.builder.quote_table(table)
+
+        # Build SELECT with DISTINCT
+        select_clause = (
+            "SELECT DISTINCT" if getattr(queryset, "_distinct", False) else "SELECT"
+        )
+        sql = f"{select_clause} * FROM {quoted_table}"
+        params: list[Any] = []
+
+        # Build WHERE clause from filters and excludes
+        where, where_params = queryset._build_where_clause()
+        if where:
+            sql += where
+            params.extend(where_params)
+
+        # Build GROUP BY clause (with annotations)
+        if getattr(queryset, "_annotations", None):
+            all_fields = list(self.model._meta.fields.keys())
+            defer_fields = getattr(queryset, "_defer_fields", [])
+            only_fields = getattr(queryset, "_only_fields", [])
+
+            group_by_fields = [f for f in all_fields if f not in defer_fields]
+            if only_fields:
+                group_by_fields = [f for f in group_by_fields if f in only_fields]
+
+            if group_by_fields:
+                quoted_fields = [self.builder.quote_column(f) for f in group_by_fields]
+                sql += f" GROUP BY {', '.join(quoted_fields)}"
+
+        # Build HAVING clause (filter on aggregations)
+        having_conditions_list = getattr(queryset, "_having_conditions", [])
+        if having_conditions_list and getattr(queryset, "_annotations", None):
+            having_conditions = []
+            having_params = []
+
+            for cond_type, cond_data in having_conditions_list:
+                if cond_type == "AND":
+                    for key, value in cond_data.items():
+                        field_name, operator = self.builder.parse_lookup(key)
+                        condition, cond_params = self.builder.build_condition(
+                            field_name, operator, value
+                        )
+                        having_conditions.append(condition)
+                        having_params.extend(cond_params)
+
+            if having_conditions:
+                sql += " HAVING " + " AND ".join(having_conditions)
+                params.extend(having_params)
+
+        # Build ORDER BY clause
+        order_by = getattr(queryset, "_order_by", None)
+        if order_by:
+            order_clause = self.builder.build_order_by(order_by)
+            if order_clause:
+                sql += " " + order_clause
+
+        # Build LIMIT and OFFSET
+        limit = getattr(queryset, "_limit", None)
+        offset = getattr(queryset, "_offset", None)
+
+        if limit is not None:
+            sql += f" LIMIT {limit}"
+        if offset is not None:
+            sql += f" OFFSET {offset}"
+
+        logger.debug(f"Built query: {sql} with params: {params}")
+        return sql, tuple(params)
+
+
 def get_safe_builder(engine: str) -> SafeBuilder:
     """Return a ``SafeBuilder`` for the given engine name."""
-    if engine == "postgresql":
+    if engine in ("postgresql", "postgres"):
         return SafeBuilder(Dialect.POSTGRESQL)
     if engine == "mysql":
         return SafeBuilder(Dialect.MYSQL)
@@ -297,4 +428,4 @@ def get_safe_builder(engine: str) -> SafeBuilder:
     return SafeBuilder(Dialect.SQLITE)
 
 
-__all__ = ["Dialect", "SafeBuilder", "get_safe_builder"]
+__all__ = ["Dialect", "SafeBuilder", "QueryBuilder", "get_safe_builder"]

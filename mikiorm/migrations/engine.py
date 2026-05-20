@@ -9,19 +9,16 @@ import os
 import sys
 import logging
 import shutil
-import uuid
 from datetime import datetime
-from typing import Any, Callable
-from functools import wraps
+from pathlib import Path
+from typing import Any
 
 from . import operations
 from .operations import MigrationOperation
 from .history import MigrationHistory
 from .diff import generate_migration_operations
 from .editor import CollectingSchemaEditor
-from .validation import MigrationFileValidator, MigrationPathValidator
-from .retry import retry_with_backoff, RetryConfig, is_transient_error
-from mikiorm.backends.base.dialect import Dialect
+from .retry import RetryConfig
 from mikiorm.backends.base.schema_editor import field_to_sql_type, _safe_default_literal
 
 logger = logging.getLogger(__name__)
@@ -84,8 +81,82 @@ class MigrationEngine:
     def get_unapplied_migrations(self, connection: Any, target: str = "default") -> list[str]:
         """Return a list of migration files that exist on disk but are not in the DB."""
         applied = self.get_applied_migrations(connection, target)
-        history = MigrationHistory.load_history(self.migrations_path)
+        history = self._build_migration_map().keys()
         return [m for m in history if m not in applied]
+
+    def _resolve_app_label(self, entry: Any) -> str | None:
+        """Normalize a model/app entry to the configured app label."""
+        if isinstance(entry, str):
+            return entry.split(".")[-1]
+
+        from ..models.base import Model
+
+        if isinstance(entry, type) and issubclass(entry, Model):
+            app_label = getattr(entry._meta, "app_label", None)
+            if app_label:
+                return app_label
+            qualified = getattr(entry, "__module__", None)
+            if qualified and "." in qualified:
+                return qualified.split(".")[-1]
+
+        if hasattr(entry, "_meta"):
+            app_label = getattr(entry._meta, "app_label", None)
+            if app_label:
+                return app_label
+
+        if hasattr(entry, "label"):
+            return getattr(entry, "label")
+        if hasattr(entry, "app_name"):
+            return getattr(entry, "app_name")
+        return None
+
+    def _get_migration_locations(
+        self, app_label: str | None = None
+    ) -> list[tuple[str | None, Path]]:
+        from ..conf.settings import settings
+
+        locations: list[tuple[str | None, Path]] = []
+        for app in settings.installed_apps:
+            label = getattr(app, "label", None) or getattr(app, "app_name", None)
+            if not label:
+                continue
+            if app_label and label != app_label:
+                continue
+
+            app_path = getattr(app, "path", None) or getattr(app, "base_path", None)
+            if app_path:
+                candidate = Path(app_path) / "migrations"
+                locations.append((label, candidate))
+            else:
+                locations.append((label, Path(self.migrations_path) / label))
+
+        if app_label and not any(label == app_label for label, _ in locations):
+            locations.append((app_label, Path(self.migrations_path) / app_label))
+
+        locations.append((None, Path(self.migrations_path)))
+
+        unique: list[tuple[str | None, Path]] = []
+        seen = set()
+        for label, path in locations:
+            key = (label, str(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append((label, path))
+        return unique
+
+    def _build_migration_map(self, app_label: str | None = None) -> dict[str, Path]:
+        locations = self._get_migration_locations(app_label=app_label)
+        history = MigrationHistory.load_history(locations)
+        mapping: dict[str, Path] = {}
+        for prefix, path in locations:
+            if not path.exists():
+                continue
+            for p in sorted(path.iterdir()):
+                if p.is_file() and p.suffix == ".py" and p.name != "__init__.py":
+                    name = p.name if prefix is None else f"{prefix}/{p.name}"
+                    mapping[name] = p
+        return mapping
 
     # ------------------------------------------------------------------
     # Migration generation - schema diff based
@@ -93,69 +164,127 @@ class MigrationEngine:
 
     def makemigrations(
         self,
-        app_label: str | list[type[Any]] | None = None,
+        app_labels: str | type | list[str | type] | None = None,
     ) -> list[operations.MigrationOperation]:
         """
-        Generate migration operations by diffing models vs database schema.
+        Generate migration operations grouped by app.
         """
         from ..settings import settings
-        from ..backends.base.base import BaseConnection
+        from ..models.base import Model
+        from ..models.register import get_default_registry
 
-        # Get connection for introspection
+        registry = get_default_registry()
+        self.discover_models()
+
         db_config = settings.get_database("default")
         adapter = db_config.get_adapter()
         connection = adapter.connect(db_config.get_connection_config())
 
+        all_ops = []
         try:
-            self.discover_models()
+            target_apps: list[str] = []
+            requested = app_labels
+            if requested is None:
+                target_apps = [app.app_name for app in registry.get_apps()]
+            else:
+                candidates = (
+                    requested if isinstance(requested, (list, tuple)) else [requested]
+                )
+                for entry in candidates:
+                    if isinstance(entry, str):
+                        target_apps.append(entry.split(".")[-1])
+                        continue
 
-            from ..models.registry import ModelRegistry
-            if not ModelRegistry.all_models():
-                logger.warning("No registered models found. Ensure modules with @register are imported.")
-                return []
+                    app_label = self._resolve_app_label(entry)
+                    if app_label:
+                        target_apps.append(app_label)
+                        continue
 
-            if not isinstance(connection, BaseConnection):
-                raise TypeError("Expected a BaseConnection")
+                    raise TypeError(
+                        "makemigrations() accepts app labels, model classes, "
+                        f"or instances. Got {type(entry).__name__}."
+                    )
 
-            ops = self.get_missing_migration_operations(connection)
-            if not ops:
-                logger.info("No schema changes detected.")
-                return []
+            seen_apps = set()
+            for app_name in target_apps:
+                if app_name in seen_apps:
+                    continue
+                seen_apps.add(app_name)
 
-            # Enforce workflow: write the file, do not apply here.
-            return self._save_migration(ops)
+                normalized_app_name = app_name.split(".")[-1]
+                app_config = registry.get_app(normalized_app_name)
+                if not app_config or not app_config.models:
+                    continue
+
+                # Generate diff specifically for this app's models
+                app_models = list(app_config.models.values())
+                ops = generate_migration_operations(
+                    connection, db_config.engine, app_models
+                )
+
+                if ops:
+                    logger.info(f"App '{app_name}': Detected changes.")
+                    self._save_migration(app_config, ops)
+                    all_ops.extend(ops)
+
+            if not all_ops:
+                logger.info("No changes detected in any app.")
+
+            return all_ops
         finally:
             connection.close()
 
     def discover_models(self) -> None:
-        """Scan configured model paths to trigger registration."""
+        """Discover models using the ``AppRegistry`` / legacy model-paths.
+
+        Route order:
+        1. If ``settings.installed_apps`` is non-empty, discover through
+           the central :class:`~mikiorm.models.register.AppRegistry` — this
+           is the primary path for Django-style projects.
+        2. Otherwise fall back to the legacy ``settings.model_paths`` walk.
+        """
         if self._discovered:
             return
 
         from ..conf.settings import settings
-        if not settings.model_paths:
-            self._discovered = True
-            return
 
-        for path in settings.model_paths:
-            abs_path = os.path.abspath(path)
-            if not os.path.exists(abs_path):
-                logger.warning(f"Model path does not exist: {abs_path}")
-                continue
-            
-            if abs_path not in sys.path:
-                sys.path.insert(0, abs_path)
-            
-            for root, _, files in os.walk(abs_path):
-                for file in files:
-                    if file.endswith(".py") and file != "__init__.py":
-                        module_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(module_path, abs_path)
-                        module_name = rel_path[:-3].replace(os.sep, ".")
-                        try:
-                            importlib.import_module(module_name)
-                        except Exception as e:
-                            logger.debug(f"Failed to import discovered module {module_name}: {e}")
+        # ── Primary path: AppRegistry / INSTALLED_APPS ──────────────────
+        if settings.installed_apps:
+            from ..models.register import get_default_registry
+
+            registry = get_default_registry()
+            try:
+                registry.auto_discover_apps_from_settings()
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning(" INSTALLED_APPS discovery raised: %s", exc)
+                # Fall through to legacy path below
+
+        # ── Legacy fallback: model_paths walk ───────────────────────────
+        elif settings.model_paths:
+            for path in settings.model_paths:
+                abs_path = os.path.abspath(path)
+                if not os.path.exists(abs_path):
+                    logger.warning("Model path does not exist: %s", abs_path)
+                    continue
+
+                if abs_path not in sys.path:
+                    sys.path.insert(0, abs_path)
+
+                for root, _, files in os.walk(abs_path):
+                    for file in files:
+                        if file.endswith(".py") and file != "__init__.py":
+                            module_path = os.path.join(root, file)
+                            rel_path = os.path.relpath(module_path, abs_path)
+                            module_name = rel_path[:-3].replace(os.sep, ".")
+                            try:
+                                importlib.import_module(module_name)
+                            except Exception as e:
+                                logger.debug(
+                                    "Failed to import discovered module %s: %s",
+                                    module_name,
+                                    e,
+                                )
+
         self._discovered = True
 
     def get_missing_migration_operations(self, connection: Any) -> list[operations.MigrationOperation]:
@@ -163,12 +292,12 @@ class MigrationEngine:
         self.discover_models()
         from ..conf.settings import settings
         db_config = settings.get_database("default")
-        
+
         ops = generate_migration_operations(connection, db_config.engine)
-        
+
         # Validate operations
         self._validate_operations(ops)
-        
+
         return ops
 
     def _validate_operations(self, ops: list[operations.MigrationOperation]) -> None:
@@ -187,16 +316,55 @@ class MigrationEngine:
                     logger.warning(f"Multiple operations on field: {field_key}")
                 seen_names.add(field_key)
 
+    def _save_migration(
+        self, app_config: Any, ops: list[operations.MigrationOperation]
+    ) -> None:
+        """Save migration to the central migrations folder."""
+        migrations_dir = self._get_migration_directory(app_config)
 
-    def _save_migration(self, ops: list[operations.MigrationOperation]) -> list[operations.MigrationOperation]:
-            os.makedirs(self.migrations_path, exist_ok=True) 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{timestamp}_auto.py"
-            filepath = os.path.join(self.migrations_path, filename)
-            self._write_migration_file(filepath, ops)
+        os.makedirs(migrations_dir, exist_ok=True)
+        init_file = migrations_dir / "__init__.py"
+        if not init_file.exists():
+            init_file.touch()
 
-            logger.info(f"Generated migration: {filename}")
-            return ops
+        existing = sorted(
+            [
+                f.name
+                for f in migrations_dir.iterdir()
+                if f.is_file()
+                and f.name.startswith(tuple("0123456789"))
+                and f.suffix == ".py"
+            ]
+        )
+        next_num = 1
+        if existing:
+            last_name = existing[-1]
+            next_num = int(last_name.split("_")[0]) + 1
+
+        prefix = f"{next_num:04}"
+        filename = f"{prefix}_initial.py" if next_num == 1 else f"{prefix}_auto.py"
+        filepath = migrations_dir / filename
+
+        self._write_migration_file(filepath, ops)
+        logger.info(f"Generated migration: {filename}")
+
+    def _get_migration_directory(self, app_config: Any) -> Path:
+        """Return the directory where migrations should be written for an app."""
+        app_label = getattr(app_config, "label", None) or getattr(
+            app_config, "app_name", None
+        )
+        app_path = getattr(app_config, "path", None) or getattr(
+            app_config, "base_path", None
+        )
+
+        if app_path:
+            candidate = Path(app_path) / "migrations"
+            return candidate
+
+        if app_label:
+            return Path(self.migrations_path) / app_label
+
+        return Path(self.migrations_path)
 
     def _apply_operations_internally(
         self, operations: list[operations.MigrationOperation], connection: Any = None, target: str = "default"
@@ -219,7 +387,7 @@ class MigrationEngine:
                 items = list(cols) if isinstance(cols, list) else [op.payload]
                 if "old_field_type" in op.payload:
                     items.append({"field_type": op.payload["old_field_type"]})
-                
+
                 for item in items:
                     ftype = item.get("field_type", "")
                     if ftype:
@@ -281,9 +449,9 @@ class MigrationEngine:
         if op_type == "create_table":
             cols_data = op.payload.get("columns", [])
             table_name = op.payload.get("name", "unknown")
-            lines.append(f"    schema_editor.execute_operation(operations.CreateTable(")
+            lines.append("    schema_editor.execute_operation(operations.CreateTable(")
             lines.append(f"        name=\"{table_name}\",")
-            lines.append(f"        columns=[")
+            lines.append("        columns=[")
             for col in cols_data:
                 fname = col["name"]
                 ftype = col["field_type"]
@@ -292,11 +460,11 @@ class MigrationEngine:
                 attr_parts = [f"{k}={repr(v)}" for k, v in attrs.items()]
                 attr_str = ", ".join(attr_parts)
                 lines.append(f"            ({short}({attr_str}), '{fname}'),")
-            lines.append(f"        ],")
+            lines.append("        ],")
             if not forward:
                 lines.append(f"        reverse_op=operations.DeleteTable('{table_name}'),")
-            lines.append(f"    )")
-            lines.append(f"    )")
+            lines.append("    )")
+            lines.append("    )")
         elif op_type == "add_field":
             model = op.payload["model_name"]
             field_type = op.payload["field_type"]
@@ -336,7 +504,9 @@ class MigrationEngine:
                     old_kw_str = ", ".join(f"{k}={v!r}" for k, v in old_kwargs.items())
                     lines.append(f"    schema_editor.execute_operation(operations.AlterField(model_name='{model}', field={old_short}({old_kw_str}), old_field={short}({kw_str})))")
                 else:
-                    lines.append(f"    # AlterField reverse requires saved old field definition")
+                    lines.append(
+                        "    # AlterField reverse requires saved old field definition"
+                    )
 
         elif op_type == "drop_field":
             model = op.payload["model_name"]
@@ -345,7 +515,7 @@ class MigrationEngine:
                 lines.append(f"    schema_editor.execute_operation(operations.RemoveField(model_name='{model}', field_name='{field_name}'))")
             if not forward:
                 # Reverse: add field back - would need saved field definition
-                lines.append(f"    # DropField reverse requires saved field definition")
+                lines.append("    # DropField reverse requires saved field definition")
 
         elif op_type == "create_index":
             model = op.payload["model_name"]
@@ -359,7 +529,7 @@ class MigrationEngine:
             model = op.payload["model_name"]
             idx_name = op.payload["index_name"]
             if not forward:
-                lines.append(f"    # DropIndex reverse requires saved index definition")
+                lines.append("    # DropIndex reverse requires saved index definition")
 
     @staticmethod
     def _build_create_table_sql(op: operations.CreateTable, schema_editor: Any) -> tuple[str, list[Any]]:
@@ -428,7 +598,7 @@ class MigrationEngine:
 
             # Ensure infrastructure exists (outside main transaction for safety)
             self._ensure_migrations_table(connection, target_alias)
-            
+
             # Acquire migration lock to prevent concurrent migrations
             lock_id = self._acquire_lock(connection, target_alias)
             if not lock_id:
@@ -436,8 +606,8 @@ class MigrationEngine:
 
             try:
                 applied = self.get_applied_migrations(connection, target_alias)
-                history = MigrationHistory.load_history(self.migrations_path)
-                pending = [m for m in history if m not in applied]
+                history_map = self._build_migration_map()
+                pending = [m for m in history_map if m not in applied]
 
                 if not pending:
                     logger.info("No migrations to apply.")
@@ -445,19 +615,21 @@ class MigrationEngine:
 
                 # SQLite Safety: backup file before destructive changes
                 if is_sqlite:
-                    has_destructive = any(self._is_destructive(os.path.join(self.migrations_path, m)) for m in pending)
+                    has_destructive = any(
+                        self._is_destructive(history_map[m]) for m in pending
+                    )
                     if has_destructive:
                         db_path = db_config.get_connection_config().get("name")
                         if db_path and db_path != ":memory:":
                             self._create_sqlite_backup(db_path)
-                
+
                 builder = get_safe_builder(db_config.engine)
                 quoted_table = builder.quote_table("_mikiorm_migrations")
-                ph = builder.param_placeholder
+                ph = builder.get_placeholder(1)
 
                 # Apply each migration atomically
                 for migration_file in pending:
-                    filepath = os.path.join(self.migrations_path, migration_file)
+                    filepath = history_map[migration_file]
                     try:
                         # Each migration in its own transaction for atomicity
                         with atomic(connection=connection):
@@ -516,12 +688,15 @@ class MigrationEngine:
             return 1337
 
         try:
-            connection.execute("CREATE TABLE IF NOT EXISTS _mikiorm_migration_lock (id INTEGER PRIMARY KEY, locked_at TIMESTAMP)", ())
-            # dialect-aware insert ignore
-            sql = "INSERT OR IGNORE INTO _mikiorm_migration_lock (id, locked_at) VALUES (1, CURRENT_TIMESTAMP)"
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS _mikiorm_migration_lock (id INTEGER PRIMARY KEY, locked_at TIMESTAMP)",
+                (),
+            )
             if db_config.engine == "mysql":
                 sql = "INSERT IGNORE INTO _mikiorm_migration_lock (id, locked_at) VALUES (1, CURRENT_TIMESTAMP)"
-            
+            else:
+                sql = "INSERT OR IGNORE INTO _mikiorm_migration_lock (id, locked_at) VALUES (1, CURRENT_TIMESTAMP)"
+
             cursor = connection.execute(sql, ())
             if cursor.rowcount == 1:
                 return 1
@@ -532,14 +707,20 @@ class MigrationEngine:
     def _release_lock(self, connection: Any, lock_id: int, target: str = "default") -> None:
         """Release migration lock."""
         from ..conf.settings import settings
+        from ..backends.base.dialect import get_safe_builder
+
         db_config = settings.get_database(target)
+        builder = get_safe_builder(db_config.engine)
+        ph = builder.get_placeholder(1)
 
         if db_config.engine == "postgresql" and lock_id == 1337:
             connection.execute("SELECT pg_advisory_unlock(1337)", ())
             return
 
         try:
-            connection.execute("DELETE FROM _mikiorm_migration_lock WHERE id = ?", (lock_id,))
+            connection.execute(
+                f"DELETE FROM _mikiorm_migration_lock WHERE id = {ph}", (lock_id,)
+            )
         except Exception:
             pass
 
@@ -592,12 +773,23 @@ class MigrationEngine:
                 quoted_table = builder.quote_table("_mikiorm_migrations")
                 ph = builder.param_placeholder
 
-                history = MigrationHistory.load_history(self.migrations_path)
-                to_rollback = history[-steps:] if steps <= len(history) else history
-                
+                history_map = self._build_migration_map()
+                applied_set = set(applied)
+                applied_history = [name for name in history_map if name in applied_set]
+                to_rollback = (
+                    applied_history[-steps:]
+                    if steps <= len(applied_history)
+                    else applied_history
+                )
+
                 # Rollback each migration in reverse order, each in its own transaction
                 for migration_file in reversed(to_rollback):
-                    filepath = os.path.join(self.migrations_path, migration_file)
+                    filepath = history_map.get(migration_file)
+                    if filepath is None:
+                        logger.warning(
+                            f"Migration file missing for rollback: {migration_file}"
+                        )
+                        continue
                     if not os.path.exists(filepath):
                         logger.warning(f"Migration file missing for rollback: {migration_file}")
                         continue
@@ -605,7 +797,7 @@ class MigrationEngine:
                     try:
                         with atomic(connection=connection):
                             self._rollback_migration_direct(filepath, connection, target=target_alias)
-                            
+
                             # Remove from DB history
                             sql = f"DELETE FROM {quoted_table} WHERE name = {ph}"
                             connection.execute(sql, (migration_file,))
@@ -653,7 +845,7 @@ class MigrationEngine:
         elif engine == "mysql":
             from mikiorm.backends.mysql.schema import DatabaseSchemaEditor
             return DatabaseSchemaEditor(connection)
-        
+
         from ..backends.base.schema_editor import SchemaEditor
         from ..backends.base.dialect import get_safe_builder
 
@@ -670,27 +862,33 @@ class MigrationEngine:
             schema_editor.execute_operation(op)
 
     def show_history(self) -> list[str]:
-        return MigrationHistory.load_history(self.migrations_path)
+        return list(self._build_migration_map().keys())
+
+    def migrate_direct(self, filepath: str, connection: Any, target: str = "default") -> None:
+        """Apply a migration file directly (backward compatibility)."""
+        self._apply_migration_direct(filepath, connection, target)
+
+    def _get_squash_directory(self, app_label: str | None = None) -> Path:
+        if app_label:
+            locations = self._get_migration_locations(app_label=app_label)
+            for label, path in locations:
+                if label == app_label:
+                    return path
+            return Path(self.migrations_path) / app_label
+        return Path(self.migrations_path)
 
     def squash_migrations(self, app_label: str | None = None) -> str | None:
         """Squash multiple migration files into a single one."""
-        history = MigrationHistory.load_history(self.migrations_path)
-        if not history:
+        history_map = self._build_migration_map(app_label=app_label)
+        if not history_map:
             logger.info("No migrations found to squash.")
             return None
 
         collected_ops = []
         collecting_schema_editor = CollectingSchemaEditor()
 
-        # Load and execute all migrations against the collecting editor
-        for migration_file in history:
-            # For now, we'll squash all. If app_label is needed, it needs to be passed to makemigrations
-            # and stored in the migration file name or content.
-            # For simplicity, let's assume app_label is not used for filtering which migrations to squash,
-            # but rather for the *name* of the squashed migration.
-
-            filepath = os.path.join(self.migrations_path, migration_file)
-            spec = importlib.util.spec_from_file_location("migration", filepath)
+        for migration_name, filepath in history_map.items():
+            spec = importlib.util.spec_from_file_location("migration", str(filepath))
             if spec is None or spec.loader is None:
                 continue
 
@@ -699,33 +897,61 @@ class MigrationEngine:
             spec.loader.exec_module(module)
 
             if hasattr(module, "apply_migration"):
-                # Pass the collecting schema editor
                 module.apply_migration(None, collecting_schema_editor)
-                logger.debug(f"Collected operations from {migration_file}")
+                logger.debug("Collected operations from %s", migration_name)
 
         if not collecting_schema_editor.collected_operations:
             logger.info("No operations collected from existing migrations.")
             return None
 
-        # Generate a new squashed migration file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         squashed_filename = f"{timestamp}_squashed_{app_label or 'all'}.py"
-        squashed_filepath = os.path.join(self.migrations_path, squashed_filename)
+        squash_dir = self._get_squash_directory(app_label)
+        os.makedirs(squash_dir, exist_ok=True)
+        squashed_filepath = squash_dir / squashed_filename
         self._write_migration_file(
             squashed_filepath, collecting_schema_editor.collected_operations
         )
 
-        # Delete old migration files
-        to_squash = history
-        for migration_file in to_squash:
-            filepath = os.path.join(self.migrations_path, migration_file)
-            os.remove(filepath)
-            logger.info(f"Deleted old migration file: {migration_file}")
-            if os.path.exists(filepath):
-                os.remove(filepath)
-                logger.info(f"Deleted old migration file: {migration_file}")
+        from ..conf.settings import settings
+        from ..backends.base.dialect import get_safe_builder
 
-        logger.info(f"Created squashed migration: {squashed_filename}")
+        db_config = settings.get_database("default")
+        adapter = db_config.get_adapter()
+        connection = adapter.connect(db_config.get_connection_config())
+        try:
+            self._ensure_migrations_table(connection)
+            applied = set(self.get_applied_migrations(connection))
+            if any(name in applied for name in history_map):
+                builder = get_safe_builder(db_config.engine)
+                quoted_table = builder.quote_table("_mikiorm_migrations")
+                ph = builder.get_placeholder(1)
+                if db_config.engine == "postgresql":
+                    sql = (
+                        f"INSERT INTO {quoted_table} (name, status) VALUES ({ph}, 'applied') "
+                        "ON CONFLICT (name) DO NOTHING"
+                    )
+                elif db_config.engine == "mysql":
+                    sql = f"INSERT IGNORE INTO {quoted_table} (name, status) VALUES ({ph}, 'applied')"
+                else:
+                    sql = f"INSERT OR IGNORE INTO {quoted_table} (name, status) VALUES ({ph}, 'applied')"
+                connection.execute(sql, (squashed_filename,))
+        finally:
+            connection.close()
+
+        for migration_name, filepath in history_map.items():
+            try:
+                if filepath.exists():
+                    os.remove(filepath)
+                    logger.info("Deleted old migration file: %s", migration_name)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to delete squashed migration file %s: %s",
+                    migration_name,
+                    exc,
+                )
+
+        logger.info("Created squashed migration: %s", squashed_filename)
         return squashed_filename
 
 
@@ -751,9 +977,9 @@ class _MigrationSchemaEditor:
     def execute_operation(self, op: MigrationOperation) -> None:
         op_type = op.operation_type
         payload = op.payload
-        
+
         if op_type == "create_table":
-            # CreateTable uses the engine's static SQL builder to avoid 
+            # CreateTable uses the engine's static SQL builder to avoid
             # fragile Field instance reconstruction from col dicts.
             from .engine import MigrationEngine as ME
             sql, params = ME._build_create_table_sql(op, self.backend_editor)
@@ -772,8 +998,9 @@ class _MigrationSchemaEditor:
             # Use captured old_field for precise alterations
             old_field = payload.get("old_field") or field
             self.backend_editor.alter_field(model, old_field, field) 
-_field(model, field, field) 
-ckend_editor.drop_index(model, payload["index_name"])
+        elif op_type == "drop_index":
+            model = _FakeModel(payload["model_name"])
+            self.backend_editor.drop_index(model, payload["index_name"])
 
         elif op_type == "delete_table":
             model = _FakeModel(payload["name"])
@@ -781,7 +1008,6 @@ ckend_editor.drop_index(model, payload["index_name"])
 
         else:
             logger.warning(f"Operation type {op_type} not handled by migration editor shim")
-
 
 
 def main() -> None:

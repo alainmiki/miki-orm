@@ -32,6 +32,7 @@ Example:
 from __future__ import annotations
 
 import importlib.util
+import importlib
 import logging
 import os
 import sys
@@ -169,66 +170,92 @@ class AppRegistry:
         del self._apps[app_name]
         logger.debug(f"Unregistered app: {app_name}")
     
-    def auto_discover(self, verbose: bool = False) -> int:
+    def auto_discover(self, verbose: bool = False, force: bool = False) -> int:
         """Auto-discover models in all registered apps.
-        
-        Scans each app's models.py file and registers all Model subclasses.
-        
+
+        Scans each app's ``models.py`` file and registers all ``Model``
+        subclasses that are defined directly in that file.
+
         Args:
-            verbose: Print discovery information
-            
+            verbose: Print discovery information.
+            force:   Re-discover even if the app has already been scanned.
+
         Returns:
-            Number of models discovered
+            Number of models discovered across all apps.
         """
         total_discovered = 0
-        
+
         for app_name, app_config in self._apps.items():
-            if app_config.is_discovered():
+            if app_config.is_discovered() and not force:
                 continue
-            
+
             if not app_config.has_models():
                 if verbose:
-                    logger.info(f"App '{app_name}': No models.py found")
+                    logger.info("App '%s': No models.py found", app_name)
                 continue
-            
+
             try:
                 discovered = self._discover_app_models(app_config, verbose)
                 total_discovered += discovered
                 app_config._discovered = True
-                
+
                 if verbose:
-                    logger.info(f"App '{app_name}': Discovered {discovered} model(s)")
+                    logger.info("App '%s': Discovered %d model(s)", app_name, discovered)
             except Exception as e:
-                logger.error(f"Error discovering models in app '{app_name}': {e}")
-        
+                logger.error("Error discovering models in app '%s': %s", app_name, e)
+
         return total_discovered
     
     def _discover_app_models(self, app_config: AppConfig, verbose: bool = False) -> int:
         """Discover models in a specific app.
-        
+
+        The path-guard below ensures the module being imported cannot escape
+        the registered app directory (prevents ``models/../../etc/passwd``
+        supply-chain or symlink attacks).
+
         Args:
-            app_config: App configuration
-            verbose: Print information
-            
+            app_config: App configuration.
+            verbose:    Print information.
+
         Returns:
-            Number of models discovered
+            Number of models discovered in *app_config*.
         """
-        from .base import Model
-        
+        from .base import Model  # local import to avoid circular deps
+
         models_file = app_config.get_models_path()
-        
+
+        # ── Security: guard against path traversal ──────────────────
+        try:
+            resolved_file = models_file.resolve()
+            resolved_base = app_config.base_path.resolve()
+            _ = resolved_file.relative_to(resolved_base)
+        except (OSError, ValueError):
+            logger.warning(
+                "Refusing to import %r: not inside registered app path %s",
+                str(models_file),
+                app_config.base_path,
+            )
+            return 0
+
         # Create a module spec for dynamic import
         spec = importlib.util.spec_from_file_location(
             f"{app_config.module_path}.models",
             models_file
         )
-        
+
         if not spec or not spec.loader:
             return 0
-        
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
+
+        try:
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+        except Exception as e:
+            logger.error(
+                "Failed to import models from '%s': %s",
+                app_config.app_name, e,
+            )
+            return 0
         
         # Find all Model subclasses in the module
         discovered = 0
@@ -249,7 +276,118 @@ class AppRegistry:
                 discovered += 1
         
         return discovered
-    
+
+    def auto_discover_app_models(
+        self, app_name: str, verbose: bool = False, force: bool = False
+    ) -> int:
+        """Discover and register models for a single named app.
+
+        Args:
+            app_name: The app to scan.
+            verbose:  Print discovery information.
+            force:    Re-discover even if already scanned.
+
+        Returns:
+            Number of models registered.
+        """
+        app_config = self._apps.get(app_name)
+        if app_config is None:
+            logger.warning("auto_discover_app_models: app '%s' is not registered", app_name)
+            return 0
+
+        if app_config.is_discovered() and not force:
+            return 0
+
+        if not app_config.has_models():
+            if verbose:
+                logger.info("App '%s': No models.py found", app_name)
+            return 0
+
+        return self._discover_app_models(app_config, verbose)
+
+    def auto_discover_apps_from_settings(self) -> int:
+        """Convenience wrapper: discover models from every entry in
+        ``settings.installed_apps``.
+
+        Apps not yet registered with this ``AppRegistry`` are registered
+        first.  Paths are resolved via :func:`_resolve_app_path` when
+        the ``installed_apps`` entry is a plain dotted name.
+
+        Returns:
+            Total number of models registered across all apps.
+        """
+        from ..conf.settings import settings
+
+        total = 0
+        for entry in settings.installed_apps:
+            label = getattr(entry, "label", entry.name)
+            path_intended: Optional[str] = None
+            if isinstance(entry, str):
+                label = entry.split(".")[-1]
+                path_intended = _resolve_app_path(entry)
+            else:
+                path_intended = entry.path
+
+            # Register app if not yet tracked by this registry
+            if not self.get_app(label):
+                if path_intended:
+                    try:
+                        self.register_app(label, path_intended)
+                    except (ValueError, FileNotFoundError) as exc:
+                        logger.warning("Could not register app %r: %s", label, exc)
+                        continue
+
+            total += self.auto_discover_app_models(label)
+
+        return total
+
+    # ── Private helpers ─────────────────────────────────────────────
+
+    @staticmethod
+    def _resolve_app_path(name: str) -> str:
+        """Resolve a dotted app name to an absolute filesystem directory.
+
+        Walks ``sys.path`` entries (virtualenv, site-packages, CWD) looking
+        for a matching ``<name>/__init__.py`` package marker.  When no match
+        is found the CWD-based fallback is returned so the caller can still
+        attempt discovery without raising.
+
+        Args:
+            name: Dotted Python path (e.g. ``"users"`` or
+                  ``"myproj.apps.users"``).
+
+        Returns:
+            Absolute path string, never raises.
+        """
+        leaf = name.split(".")[-1]
+
+        # entries in sys.path first (virtualenv / site-packages ordering)
+        for entry in sys.path:
+            candidate = Path(entry) / name.replace(".", os.sep)
+            if (candidate / "__init__.py").exists():
+                return str(candidate.resolve())
+            # Also check the simple leaf name
+            leaf_dir = Path(entry) / leaf
+            if (leaf_dir / "__init__.py").exists():
+                return str(leaf_dir.resolve())
+
+        # CWD and direct leaf-sub-path
+        cwd = Path.cwd()
+        direct = cwd / name.replace(".", os.sep)
+        if (direct / "__init__.py").exists() or direct.is_dir():
+            return str(direct.resolve())
+        cwd_leaf = cwd / leaf
+        if (cwd_leaf / "__init__.py").exists() or cwd_leaf.is_dir():
+            return str(cwd_leaf.resolve())
+
+        # Absolute path case
+        p = Path(name)
+        if p.is_dir():
+            return str(p.resolve())
+
+        # CWD leaf fallback — safest default for |startapp| style layout
+        return str((cwd / leaf).resolve())
+
     def register_model_in_app(
         self,
         app_name: str,
@@ -272,6 +410,10 @@ class AppRegistry:
         app_config = self._apps[app_name]
         model_name = model.__name__
         
+        # Sync app_label to model meta
+        if hasattr(model, '_meta'):
+            model._meta.app_label = app_name
+
         # Store in app's models
         app_config.models[model_name] = model
         
@@ -282,7 +424,8 @@ class AppRegistry:
         # Store in name index (for ambiguity resolution)
         if model_name not in self._models_by_name:
             self._models_by_name[model_name] = []
-        self._models_by_name[model_name].append(model)
+        if model not in self._models_by_name[model_name]:
+            self._models_by_name[model_name].append(model)
         
         # Store in global registry (backward compat)
         if model_name not in self._global_registry:
@@ -478,36 +621,35 @@ def set_default_registry(registry: AppRegistry) -> None:
     _default_registry = registry
 
 
-def register(app: str = 'default') -> Callable[[Type[T]], Type[T]]:
+def register(app: str, **kwargs) -> Callable[[Type[T]], Type[T]]:
     """Decorator for registering a model.
     
-    Usage:
-        @register(app='users')
-        class User(Model):
-            name = CharField()
-    
-    Args:
-        app: Name of app to register model in (default: 'default')
-        
-    Returns:
-        Decorator function
+    Mandatorily requires an app label to ensure namespacing.
     """
-    def decorator(model_class: Type[T]) -> Type[T]:
-        registry = get_default_registry()
-        
-        # Ensure app is registered
-        if not registry.get_app(app):
-            # Auto-register with current directory as base
+    app_name = kwargs.get('app_label', app)
+    
+    if not isinstance(app_name, str):
+        raise ValueError(
+            "@register decorator now mandatorily requires an app label string. "
+            "Usage: @register(app='your_app_name')"
+        )
+
+    registry = get_default_registry()
+
+    def do_register(model_cls: Type[T], app_name: str) -> Type[T]:
+        if not registry.get_app(app_name):
             try:
-                registry.register_app(app, '.')
+                # Fallback registration for simple scripts
+                registry.register_app(app_name, os.getcwd())
             except ValueError:
                 pass  # App already registered
-        
-        # Register the model
-        registry.register_model_in_app(app, model_class)
-        
+        registry.register_model_in_app(app_name, model_cls)
+        return model_cls
+
+    def decorator(model_class: Type[T]) -> Type[T]:
+        do_register(model_class, app_name)
         return model_class
-    
+
     return decorator
 
 
@@ -659,6 +801,8 @@ __all__ = [
     "register_app",
     "get_model",
     "auto_discover",
+    "auto_discover_app_models",
+    "auto_discover_apps_from_settings",
     "list_models",
     "get_all_models",
     "get_apps",

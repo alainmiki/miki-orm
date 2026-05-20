@@ -3,9 +3,12 @@
 Public surface:
 
 * :class:`DatabaseConfig` - typed view of one DATABASES entry.
-* :class:`Settings` - global container (DATABASES, INSTALLED_APPS, ...).
-* :data:`settings` - the singleton; populated by :func:`configure`.
-* :func:`configure` - one-shot entry point used by application code.
+* :class:`AppConfig`       - metadata for one INSTALLED_APPS entry.
+* :class:`Settings`        - global container (DATABASES, INSTALLED_APPS, ...).
+* :data:`settings`         - the singleton; populated by :func:`configure`.
+* :func:`configure`        - one-shot entry point used by application code.
+* :func:`configure_from_module` - load settings from a Python module (Django-style).
+* :func:`generate_settings_template` - produce a ready-to-edit settings.py scaffold.
 * :class:`ConnectionManager` / :class:`AsyncConnectionManager` - lazily
   build and reuse a single pool per alias, returning checked-out
   connections via context managers.
@@ -18,13 +21,16 @@ by registering its adapter class.
 from __future__ import annotations
 
 import importlib
+import keyword
 import logging
 import os
+import sys
 import time
 import asyncio
 import threading
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Iterator, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ..backends.base import (
     AsyncConnectionPool,
@@ -37,6 +43,65 @@ from ..backends.base import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Security: Reserved Python keywords (app names must not clash)
+# ---------------------------------------------------------------------------
+_RESERVED_KEYWORDS: frozenset = frozenset(
+    {
+        "false",
+        "none",
+        "true",
+        "and",
+        "as",
+        "assert",
+        "async",
+        "await",
+        "break",
+        "class",
+        "continue",
+        "def",
+        "del",
+        "elif",
+        "else",
+        "except",
+        "finally",
+        "for",
+        "from",
+        "global",
+        "if",
+        "import",
+        "in",
+        "is",
+        "lambda",
+        "nonlocal",
+        "not",
+        "or",
+        "pass",
+        "raise",
+        "return",
+        "try",
+        "while",
+        "with",
+        "yield",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# Security: disallowed top-level packages for settings-import safety
+# ---------------------------------------------------------------------------
+_DISALLOWED_MODULE_PREFIXES: Tuple[str, ...] = (
+    "os",
+    "sys",
+    "subprocess",
+    "importlib",
+    "shutil",
+    "code",
+    "builtins",
+    "posix",
+    "nt",
+    "io",
+    "socket",
+)
 
 # ---------------------------------------------------------------------------
 # Backend registry
@@ -118,6 +183,151 @@ for _name, _sync, _async in (
 
 
 # ---------------------------------------------------------------------------
+# AppConfig metadata — mirrors a single INSTALLED_APPS entry
+# ---------------------------------------------------------------------------
+
+
+class AppConfig:
+    """Metadata for one entry in ``settings.INSTALLED_APPS``.
+
+    Attributes:
+        name: Dotted Python path to the app package (e.g. ``"users"``).
+        path: Absolute filesystem path to the app directory.
+              Resolved from *name* when not supplied explicitly.
+        label: Short label used in migration table names and model
+               namespacing.  Defaults to the last path component of *name*.
+    """
+
+    __slots__ = ("name", "path", "label")
+
+    def __init__(
+        self,
+        name: str,
+        path: Optional[str] = None,
+        label: Optional[str] = None,
+    ) -> None:
+        _validate_app_name(name)
+        self.name = name
+        self.path = str(Path(path).resolve()) if path else _resolve_app_path(name)
+        self.label = label or name.split(".")[-1]
+        _validate_app_label(self.label)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"AppConfig(name={self.name!r}, path={self.path!r}, "
+            f"label={self.label!r})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Security validators
+# ---------------------------------------------------------------------------
+
+
+def _validate_app_name(name: str) -> None:
+    """Raise ``ValueError`` if *name* is not a safe Python identifier or module path."""
+    if not name or not isinstance(name, str):
+        raise ValueError("App name must be a non-empty string")
+
+    for part in name.split("."):
+        if not part.isidentifier():
+            raise ValueError(
+                f"Invalid app name {name!r}: segment {part!r} must be a valid Python identifier"
+            )
+        if part.lower() in _RESERVED_KEYWORDS:
+            raise ValueError(
+                f"Invalid app name {name!r}: segment {part!r} conflicts with a Python keyword"
+            )
+
+
+def _validate_app_label(label: str) -> None:
+    """Raise ``ValueError`` if the app label is not a safe identifier."""
+    if not label or not isinstance(label, str):
+        raise ValueError("App label must be a non-empty string")
+    if not label.isidentifier():
+        raise ValueError(
+            f"Invalid app label {label!r}: must be a valid Python identifier"
+        )
+    if label.lower() in _RESERVED_KEYWORDS:
+        raise ValueError(
+            f"Invalid app label {label!r}: conflicts with a Python keyword"
+        )
+
+
+def _validate_app_path(path: str, app_name: str) -> None:
+    """Raise ``ValueError`` if *path* resolves outside the project root."""
+    resolved = Path(path).resolve()
+    cwd = Path.cwd().resolve()
+    try:
+        resolved.relative_to(cwd)
+    except ValueError:
+        # Allow when an explicit allowlist env-var is set.
+        allowed_root = os.getenv("MIKIORM_ALLOWED_PROJECT_ROOT", "").strip()
+        if allowed_root:
+            try:
+                resolved.relative_to(Path(allowed_root).resolve())
+                return
+            except ValueError:
+                pass
+        raise ValueError(
+            f"App path for {app_name!r} ({resolved}) is outside the current "
+            "working directory.  Set MIKIORM_ALLOWED_PROJECT_ROOT to allow it."
+        )
+
+
+def _validate_module_path(module_path: str) -> None:
+    """Raise ``ValueError`` if *module_path* resolves to a disallowed module."""
+    if not module_path or not module_path.strip():
+        raise ValueError("module_path must be a non-empty string")
+    top_pkg = module_path.split(".")[0]
+    if top_pkg.lower() in _DISALLOWED_MODULE_PREFIXES:
+        raise ValueError(
+            f"Refusing to load {module_path!r}: top-level package "
+            f"{top_pkg!r} is disallowed for settings modules"
+        )
+    if module_path in ("__main__", "builtins", "builtins"):
+        raise ValueError(f"Refusing to load {module_path!r}: reserved module name")
+
+
+def _resolve_app_path(name: str) -> str:
+    """Resolve an app *name* to a filesystem directory path.
+
+    Walks entries in ``sys.path`` and the current working directory looking
+    for a matching ``<name>/__init__.py`` package marker.  Falls back to the
+    CWD so the caller never raises for a missing path.
+
+    Args:
+        name: Dotted app name (e.g. ``"users"`` or ``"myproj.apps.users"``).
+
+    Returns:
+        Resolved absolute path string.
+    """
+    candidates: List[str] = []
+    # sys.path first (virtualenv / site-packages entries)
+    for entry in sys.path:
+        pkg_dir = Path(entry) / name.replace(".", os.sep)
+        if (pkg_dir / "__init__.py").exists():
+            return str(pkg_dir.resolve())
+        candidates.append(str(Path(entry) / name))
+
+    # CWD and its explicit sub-path variant
+    cwd = Path.cwd()
+    direct = cwd / name.replace(".", os.sep)
+    if (direct / "__init__.py").exists() or direct.is_dir():
+        return str(direct.resolve())
+    if (cwd / name).is_dir():
+        return str((cwd / name).resolve())
+
+    # Absolute / already-correct path as last resort
+    p = Path(name)
+    if p.is_dir():
+        return str(p.resolve())
+
+    # Final fallback: close to CWD so downstream code can still attempt
+    return str((cwd / name.split(".")[-1]).resolve())
+
+
+# ---------------------------------------------------------------------------
 # Database configuration
 # ---------------------------------------------------------------------------
 
@@ -188,8 +398,6 @@ class DatabaseConfig:
             "PORT": self.port,
             "OPTIONS": dict(self.options),
         }
-        # Pull any environment-backed secrets in.  Each entry maps a config
-        # key (NAME/USER/PASSWORD/...) to an environment variable name.
         for key, env_var in self.secrets.items():
             env_val = os.getenv(env_var)
             if env_val is not None:
@@ -238,7 +446,7 @@ class ConnectionManager:
                     db_config = settings.get_database(db_alias)
                     adapter = db_config.get_sync_adapter()
                     pool_config = db_config.get_pool_config()
-                    
+
                     logger.debug("Initializing sync connection pool for %s", db_alias)
                     self._pools[db_alias] = adapter.create_pool(
                         db_config.get_connection_config(),
@@ -260,7 +468,7 @@ class ConnectionManager:
                 if attempt >= max_retries:
                     logger.error("Failed to acquire connection from pool %s after %d retries", db_alias, max_retries)
                     raise
-                
+
                 wait = retry_delay * (2 ** attempt)
                 logger.warning(
                     "Connection pool %s exhausted. Retrying in %.2fs (attempt %d/%d)",
@@ -369,14 +577,16 @@ class AsyncConnectionManager:
     async def get_pool(self, db_alias: str = "default") -> AsyncConnectionPool:
         if db_alias not in self._pools:
             async with self._get_lock():
-                # Double-check pattern to avoid redundant pool creation
                 if db_alias not in self._pools:
                     db_config = settings.get_database(db_alias)
                     try:
                         adapter = db_config.get_async_adapter()
                     except ValueError as e:
-                        raise RuntimeError(f"Async operations not supported for engine {db_config.engine}: {e}")
-                        
+                        raise RuntimeError(
+                            f"Async operations not supported for engine "
+                            f"{db_config.engine}: {e}"
+                        )
+
                     self._pools[db_alias] = await adapter.create_pool(
                         db_config.get_connection_config(),
                         db_config.get_pool_config(),
@@ -384,7 +594,7 @@ class AsyncConnectionManager:
         return self._pools[db_alias]
 
     async def get_connection(self, db_alias: str = "default") -> PooledAsyncConnection:
-        """Borrow a pooled connection with exponential backoff and retry (async)."""
+        """Borrow a pooled connection with exponential backoff and retry."""
         cb = self._get_circuit_breaker(db_alias)
         if not cb.can_execute():
             raise RuntimeError(f"Circuit breaker is OPEN for database {db_alias}")
@@ -403,13 +613,22 @@ class AsyncConnectionManager:
             except asyncio.TimeoutError:
                 if attempt >= max_retries:
                     cb.record_failure()
-                    logger.error("Async: Failed to acquire connection from pool %s after %d retries", db_alias, max_retries)
+                    logger.error(
+                        "Async: Failed to acquire connection from pool %s "
+                        "after %d retries",
+                        db_alias,
+                        max_retries,
+                    )
                     raise
 
                 wait = retry_delay * (2 ** attempt)
                 logger.warning(
-                    "Async: Connection pool %s exhausted. Retrying in %.2fs (attempt %d/%d)",
-                    db_alias, wait, attempt + 1, max_retries
+                    "Async: Connection pool %s exhausted. "
+                    "Retrying in %.2fs (attempt %d/%d)",
+                    db_alias,
+                    wait,
+                    attempt + 1,
+                    max_retries,
                 )
                 await asyncio.sleep(wait)
             except Exception:
@@ -419,10 +638,12 @@ class AsyncConnectionManager:
     @contextmanager
     def connection(self, db_alias: str = "default"):
         """
-        This is a legacy helper. For async usage, prefer the manual 
-        acquire/release pattern or implement an async context manager.
+        This is a legacy helper. For async usage, prefer the
+        async_connection() context manager.
         """
-        raise RuntimeError("Use 'async with connection_manager.async_connection()' for async logic.")
+        raise RuntimeError(
+            "Use 'async with connection_manager.async_connection()' " "for async logic."
+        )
 
     def async_connection(self, db_alias: str = "default") -> AsyncConnectionContext:
         """Borrow a pooled connection via async context manager."""
@@ -450,18 +671,92 @@ class AsyncConnectionManager:
 
 
 class Settings:
-    """Global container for ORM settings (Django-style ``DATABASES`` etc.)."""
+    """Global container for ORM settings (Django-style DATABASES / INSTALLED_APPS)."""
 
     def __init__(self) -> None:
         self.databases: Dict[str, DatabaseConfig] = {}
         self.default_database: str = "default"
         self.migration_path: str = "migrations"
-        self.model_paths: list[str] = []
+        self.model_paths: List[str] = []
+
+        # ── Django-style ────────────────────────────────────────────
+        self.installed_apps: List["AppConfig"] = []
+        self.secret_key: str = ""
+        self.debug: bool = False
+        self.allowed_hosts: List[str] = []
+        self.use_tz: bool = True
+
+        # ── Logging ─────────────────────────────────────────────────
         self.logging: Dict[str, Any] = {}
 
     def configure_databases(self, databases: Dict[str, Dict[str, Any]]) -> None:
         for alias, config in databases.items():
             self.databases[alias] = DatabaseConfig(config)
+
+    def configure_installed_apps(self, apps: list) -> None:
+        """Validate and store INSTALLED_APPS entries.
+
+        Args:
+            apps: A list of ``str`` app names or :class:`AppConfig` instances.
+
+        Raises:
+            TypeError:       An entry is neither ``str`` nor :class:`AppConfig`.
+            ValueError:      An app name fails validation or its path is unsafe.
+        """
+        validated: List[AppConfig] = []
+        for entry in apps:
+            if isinstance(entry, str):
+                cfg = AppConfig(name=entry)
+            elif isinstance(entry, AppConfig):
+                cfg = entry
+            else:
+                raise TypeError(
+                    "INSTALLED_APPS entries must be str or AppConfig, "
+                    f"got {type(entry)!r}"
+                )
+
+            _validate_app_name(cfg.name)
+            _validate_app_label(cfg.label)
+            if cfg.path:
+                cfg.path = str(Path(cfg.path).resolve())
+                _validate_app_path(cfg.path, cfg.name)
+
+            validated.append(cfg)
+
+        self.installed_apps = validated
+
+        # Auto-register with the central AppRegistry so that
+        # MigrationEngine and other consumers see the same apps.
+        try:
+            from ..models.register import get_default_registry
+
+            reg = get_default_registry()
+            for cfg in validated:
+                if cfg.path and not reg.get_app(cfg.label):
+                    reg.register_app(cfg.label, cfg.path)
+        except Exception as exc:
+            logger.warning("Could not auto-register INSTALLED_APPS entries: %s", exc)
+
+    def get_installed_apps(self) -> List[AppConfig]:
+        """Return the list of configured installed apps."""
+        return list(self.installed_apps)
+
+    def append_app(self, app: "AppConfig") -> None:
+        """Register an additional app at runtime."""
+        _validate_app_name(app.name)
+        _validate_app_label(app.label)
+        if app.path:
+            app.path = str(Path(app.path).resolve())
+            _validate_app_path(app.path, app.name)
+        self.installed_apps.append(app)
+        try:
+            from ..models.register import get_default_registry
+
+            reg = get_default_registry()
+            if app.path and not reg.get_app(app.label):
+                reg.register_app(app.label, app.path)
+        except Exception as exc:
+            logger.warning("Could not append app %r to registry: %s", app.label, exc)
 
     def get_database(self, name: Optional[str] = None) -> DatabaseConfig:
         alias = name or self.default_database
@@ -473,34 +768,44 @@ class Settings:
         return self.databases[alias]
 
 
-# Singletons -----------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Singleton instances
+# ---------------------------------------------------------------------------
 settings = Settings()
 connection_manager = ConnectionManager()
 async_connection_manager = AsyncConnectionManager()
 
 
+# ---------------------------------------------------------------------------
+# Public API: configure(), configure_from_module(), generate_settings_template()
+# ---------------------------------------------------------------------------
+
+
 def configure(
-    databases: Dict[str, Dict[str, Any]] | None = None,
+    databases: Optional[Dict[str, Dict[str, Any]]] = None,
     *,
     migration_path: Optional[str] = None,
     default_database: Optional[str] = None,
-    model_paths: Optional[list[str]] = None,
+    model_paths: Optional[List[str]] = None,
+    installed_apps: Optional[list] = None,
     logging_config: Optional[Dict[str, Any]] = None,
 ) -> None:
     """One-shot configuration entry point used by application code.
 
-    Example::
+    All parameters are optional keyword-only (except ``databases``) so that
+    Django-style modules can call::
 
         from mikiorm import configure
+        configure(DATABASES, installed_apps=INSTALLED_APPS)
+
+    Example::
+
         configure({
             "default": {"ENGINE": "sqlite", "NAME": "app.db"},
         }, migration_path="db/migrations")
     """
     if databases is not None:
-        # Reset existing pools so the new config takes effect.
         connection_manager.close_all()
-        # AsyncConnectionManager pools cannot be closed synchronously; they
-        # will be closed by the user via close_all() if needed.
         async_connection_manager._pools.clear()
         settings.databases.clear()
         settings.configure_databases(databases)
@@ -510,18 +815,143 @@ def configure(
         settings.migration_path = migration_path
     if model_paths is not None:
         settings.model_paths = model_paths
+    if installed_apps is not None:
+        settings.configure_installed_apps(installed_apps)
     if logging_config is not None:
         settings.logging.update(logging_config)
 
 
+def configure_from_module(module_path: str) -> None:
+    """Load settings from a Python module (Django style).
+
+    Reads ``DATABASES``, ``DEFAULT_DATABASE``, ``MIGRATION_PATH``,
+    ``MODEL_PATHS``, and ``INSTALLED_APPS`` from the named module and
+    passes them to :func:`configure`.
+
+    Security: ``module_path`` must refer to an application-level module;
+    stdlib and system packages are explicitly blocked.
+
+    Args:
+        module_path: Dotted Python path, e.g. ``"myproject.settings"``.
+
+    Raises:
+        ValueError: If the module resolves to a disallowed package.
+        ImportError: If the module cannot be found.
+    """
+    _validate_module_path(module_path)
+    mod = importlib.import_module(module_path)
+    configure(
+        databases=getattr(mod, "DATABASES", None),
+        default_database=getattr(mod, "DEFAULT_DATABASE", "default"),
+        migration_path=getattr(mod, "MIGRATION_PATH", "migrations"),
+        model_paths=getattr(mod, "MODEL_PATHS", None),
+        installed_apps=getattr(mod, "INSTALLED_APPS", []),
+        logging_config=getattr(mod, "LOGGING", None),
+    )
+
+
+def generate_settings_template(
+    project_name: str = "myproject",
+    *,
+    include_generated_by: bool = True,
+) -> str:
+    """Return a ready-to-edit ``settings.py`` scaffold string.
+
+    Called by the ``startproject`` CLI command to write the initial
+    settings file.  The generated file uses clear, commented sections so
+    that users know exactly where to fill in each configuration.
+
+    Args:
+        project_name:     Used for the package-header comment only.
+        include_generated_by: Prepend a ``# Generated by miki-orm`` header.
+
+    Returns:
+        A complete ``settings.py`` file content string.
+    """
+    header = (
+        f'"""Settings for {project_name!s}."""\n\n'
+        if project_name
+        else '"""Project settings."""\n\n'
+    )
+
+    generated_tag = (
+        (
+            "# Generated by miki-orm startproject. "
+            "Edit this file to configure your project.\n\n"
+        )
+        if include_generated_by
+        else ""
+    )
+
+    return f'''\
+"""
+{project_name} settings — configure your miki-orm application here.
+"""
+
+from pathlib import Path
+
+from mikiorm import configure
+
+# ─── Filesystem ────────────────────────────────────────────────────────────
+BASE_DIR = Path(__file__).parent.parent  # project root
+
+
+# ─── Database (SQLite example) ─────────────────────────────────────────────
+# DATABASES = {{
+#     "default": {{
+#         "ENGINE": "sqlite",
+#         "NAME":   BASE_DIR / "db.sqlite3",
+#     }},
+# }}
+# DEFAULT_DATABASE = "default"
+
+
+# ─── Installed apps ────────────────────────────────────────────────────────
+# INSTALLED_APPS: list[str] = [
+#     # "users",
+#     # "products",
+# ]
+
+
+# ─── Migrations & model discovery ─────────────────────────────────────────
+# MIGRATION_PATH = "migrations"
+# MODEL_PATHS: list[str] = []
+
+
+# ─── Runtime ───────────────────────────────────────────────────────────────
+# SECRET_KEY  = "change-me"
+# DEBUG       = False
+# ALLOWED_HOSTS: list[str] = []
+# USE_TZ      = True
+
+
+def configure_project() -> None:
+    """Configure the ORM from this settings module.
+
+    Call this once at application startup so that database connections,
+    app registration, and model discovery are all wired up.
+    """
+    configure(
+        databases=DATABASES,
+        default_database=DEFAULT_DATABASE,
+        migration_path=MIGRATION_PATH,
+        model_paths=MODEL_PATHS,
+        installed_apps=INSTALLED_APPS,
+    )
+'''
+
+
 __all__ = [
+    "AppConfig",
     "AsyncConnectionManager",
     "ConnectionManager",
     "DatabaseConfig",
     "Settings",
     "async_connection_manager",
     "configure",
+    "configure_from_module",
     "connection_manager",
+    "generate_settings_template",
     "register_async_adapter",
     "register_sync_adapter",
     "settings",

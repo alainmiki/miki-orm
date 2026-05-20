@@ -259,7 +259,7 @@ class Model(metaclass=ModelMeta):
 
     def _build_insert(self) -> tuple[str, list[Any]]:
         from .fields import AutoField, DateTimeField
-        from ..query.safe_builder import get_safe_builder
+        from ..query import get_safe_builder
         from ..conf.settings import settings
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
@@ -294,7 +294,7 @@ class Model(metaclass=ModelMeta):
 
     def _build_update(self) -> tuple[str, list[Any]]:
         from .fields import DateTimeField
-        from ..query.safe_builder import get_safe_builder
+        from ..query import get_safe_builder
         from ..conf.settings import settings
 
         pk_name, pk_field = self._get_pk_field()
@@ -359,7 +359,7 @@ class Model(metaclass=ModelMeta):
         pk_value = pk_field.db_value(getattr(self, pk_name, None))
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
 
-        from ..query.safe_builder import get_safe_builder
+        from ..query import get_safe_builder
         from ..conf.settings import settings
 
         db_config = settings.databases.get("default")
@@ -385,7 +385,7 @@ class Model(metaclass=ModelMeta):
             GenericIPAddressField, FilePathField
         )
         from ..models.relationships import ForeignKey, ManyToManyField
-        from ..query.safe_builder import get_safe_builder
+        from ..query import get_safe_builder
         from ..conf.settings import settings
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
@@ -632,7 +632,7 @@ class Model(metaclass=ModelMeta):
         pk_value = pk_field.db_value(getattr(self, pk_name, None))
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"
 
-        from ..query.safe_builder import get_safe_builder
+        from ..query import get_safe_builder
         from ..conf.settings import settings
 
         db_config = settings.databases.get("default")
@@ -659,7 +659,7 @@ class Model(metaclass=ModelMeta):
             GenericIPAddressField, FilePathField
         )
         from ..models.relationships import ForeignKey, ManyToManyField
-        from ..query.safe_builder import get_safe_builder
+        from ..query import get_safe_builder
         from ..conf.settings import settings
 
         table = self._meta.table_name or self.__class__.__name__.lower() + "s"

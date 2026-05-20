@@ -101,15 +101,25 @@ class RenameField(MigrationOperation):
     """Rename a field on a model."""
     
     def __init__(self, model_name: str, old_name: str, new_name: str) -> None:
+        # Handle case where model_name is a class instead of string
+        if isinstance(model_name, type):
+            # Extract model name from class - fallback to class name if no app_label
+            if hasattr(model_name, '_meta') and hasattr(model_name._meta, 'app_label') and model_name._meta.app_label:
+                resolved_name = f"{model_name._meta.app_label}.{model_name.__name__}"
+            else:
+                resolved_name = model_name.__name__
+        else:
+            resolved_name = model_name
+            
         payload = {
-            "model_name": model_name,
+            "model_name": resolved_name,
             "old_name": old_name,
             "new_name": new_name,
         }
         super().__init__()
         self.operation_type = "rename_field"
         self.payload = payload
-        self.reverse_op = RenameField(model_name=model_name, old_name=new_name, new_name=old_name)
+        self.reverse_op = RenameField(resolved_name, new_name, old_name)
 
 
 class CreateIndex(MigrationOperation):

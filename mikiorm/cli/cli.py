@@ -1,194 +1,486 @@
 #!/usr/bin/env python3
-"""Unified miki-orm CLI Tool - imports from consolidated cli_unified module."""
+"""
+miki-orm CLI Tool.
 
-# Re-export from consolidated CLI for backward compatibility
-from .cli_unified import (
-    ConfigFormat,
-    CLIConfig,
-    ConfigValidator,
-    ConfigLoader,
-    CommandGroup,
-    CLIManager,
-    load_settings,
-    main,
-)
+Configuration is sourced exclusively from a Python ``settings.py`` module
+passed via ``--settings`` or the ``MIKI_ORM_SETTINGS_MODULE`` environment
+variable.  No YAML / TOML / pyproject.toml config files are supported.
 
-__all__ = [
-    "ConfigFormat",
-    "CLIConfig",
-    "ConfigValidator",
-    "ConfigLoader",
-    "CommandGroup",
-    "CLIManager",
-    "load_settings",
-    "main",
+New-project flow::
+
+    python -m mikiorm startproject conf .          # ./conf/settings.py
+    python -m mikiorm startapp  users apps/         # ./apps/users/
+    python -m mikiorm --settings=conf.settings makemigrations
+
+Every migrate- or check- command honours ``--settings`` as before.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger("miki-orm.cli")
+
+
+# ---------------------------------------------------------------------------
+# Boilerplate generators (startapp / startproject)
+# ---------------------------------------------------------------------------
+
+#: Written to ``<app>/app.py`` by the ``startapp`` command.
+_APP_PY = '''\
+# app.py — App configuration for {app_name}
+from mikiorm.conf.settings import AppConfig
+
+
+class AppConfig(AppConfig):
+    """Application configuration for the '{app_name}' app."""
+
+    name = "{app_name}"
+    label = "{app_name}"
+
+
+__all__ = ["AppConfig"]
+'''
+
+#: Written to ``<app>/models.py`` by the ``startapp`` command.
+_MODELS_PY = """\
+# models.py — Database models for the '{app_name}' app
+from mikiorm.models import Model, CharField, IntegerField, DateTimeField
+
+# ─── Register your models below ────────────────────────────────────────────
+#
+# To create a model:
+#
+#     from mikiorm.models import register
+#
+#     @register(app="{app_name}")
+#     class MyModel(Model):
+#         name = CharField(max_length=100)
+#
+#         class Meta:
+#             table_name = "{app_name}_mymodel"
+#             verbose_name = "My Model"
+"""
+
+
+def _generate_settings_scaffold(
+    project_name: str = "myproject",
+    *,
+    as_package: bool = False,
+) -> str:
+    """Return the content string for a new ``settings.py`` file.
+
+    Args:
+        project_name: Used for the header comment.
+        as_package:   When *True* the settings file is inside a package
+                      directory so ``BASE_DIR`` is one level higher.
+
+    Returns:
+        Ready-to-write settings.py source.
+    """
+    base_dir_line = "BASE_DIR = Path(__file__).parent.parent  # project root"
+
+    return f'''\
+"""
+{project_name} settings — configure your miki-orm application here.
+"""
+
+from pathlib import Path
+
+from mikiorm import configure
+
+# ─── Filesystem ────────────────────────────────────────────────────────────
+BASE_DIR = {base_dir_line}
+
+
+# ─── Database (SQLite example) ─────────────────────────────────────────────
+DATABASES = {{
+    # "default": {{
+    #     "ENGINE": "sqlite",
+    #     "NAME":   BASE_DIR / "db.sqlite3",
+    # }},
+}}
+DEFAULT_DATABASE = "default"
+
+
+# ─── Installed apps ────────────────────────────────────────────────────────
+INSTALLED_APPS: list[str] = [
+    # "users",
+    # "products",
 ]
 
-if __name__ == "__main__":
-    main()
+
+# ─── Migrations & model discovery ─────────────────────────────────────────
+MIGRATION_PATH = "migrations"
+MODEL_PATHS: list[str] = []
 
 
-def main():
+# ─── Runtime ───────────────────────────────────────────────────────────────
+SECRET_KEY  = "change-me"
+DEBUG       = False
+ALLOWED_HOSTS: list[str] = []
+USE_TZ      = True
+
+
+def configure_project() -> None:
+    """Configure the ORM from this settings module.
+
+    Call this once at application startup so that database connections,
+    app registration, and model discovery are all wired up.
+    """
+    configure(
+        databases=DATABASES,
+        default_database=DEFAULT_DATABASE,
+        migration_path=MIGRATION_PATH,
+        model_paths=MODEL_PATHS,
+        installed_apps=INSTALLED_APPS,
+    )
+'''
+
+
+# ---------------------------------------------------------------------------
+# CLI helpers
+# ---------------------------------------------------------------------------
+
+
+def load_settings(settings_module: str) -> None:
+    """Import the named settings module and configure miki-orm from it."""
+    try:
+        mod = importlib.import_module(settings_module)
+        logger.info("Using settings from: %s", settings_module)
+        from mikiorm.conf.settings import configure
+
+        if hasattr(mod, "configure_project") and callable(mod.configure_project):
+            mod.configure_project()
+        else:
+            configure(
+                databases=getattr(mod, "DATABASES", None),
+                default_database=getattr(mod, "DEFAULT_DATABASE", "default"),
+                migration_path=getattr(mod, "MIGRATION_PATH", "migrations"),
+                model_paths=getattr(mod, "MODEL_PATHS", None),
+                installed_apps=getattr(mod, "INSTALLED_APPS", []),
+                logging_config=getattr(mod, "LOGGING", None),
+            )
+    except ImportError as exc:
+        logger.error("Could not find settings module '%s'.", settings_module)
+        logger.error("Details: %s", exc)
+        sys.exit(1)
+    except Exception as exc:
+        logger.error("Error loading settings from '%s': %s", settings_module, exc)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Command: startproject
+# ---------------------------------------------------------------------------
+
+
+def _handle_startproject(args: Any) -> None:
+    """Create a new miki-orm project scaffold containing ``settings.py``."""
+    project_name = args.project_name
+    target = Path(args.target_dir).resolve()
+    project_dir = target / project_name
+
+    if project_dir.exists() and any(project_dir.iterdir()):
+        print(
+            f"Error: directory '{project_dir}' already exists and is not empty.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    project_dir.mkdir(parents=True, exist_ok=True)
+    settings_file = project_dir / "settings.py"
+
+    settings_file.write_text(
+        _generate_settings_scaffold(project_name=project_name),
+        encoding="utf-8",
+    )
+
+    print(f"Created project:\n  {settings_file.relative_to(Path.cwd())}")
+    print("\nNext steps:")
+    print("  1. Edit the settings.py to configure DATABASES and INSTALLED_APPS")
+    print("  2. Call configure_project() at startup, or:")
+    print("       python -m mikiorm --settings=conf.settings makemigrations")
+
+
+# ---------------------------------------------------------------------------
+# Command: startapp
+# ---------------------------------------------------------------------------
+
+
+def _handle_startapp(args: Any) -> None:
+    """Scaffold a new app with ``app.py`` and ``models.py`` boilerplate files.
+
+    Layouts:
+    - ``mikiorm startapp users``              → ``./users/app.py`` + ``models.py``
+    - ``mikiorm startapp users apps/``        → ``./apps/users/app.py`` + ``models.py``
+    - ``mikiorm startapp users apps/products`` → ``./apps/products/app.py`` + ``models.py``
+    """
+    app_name = args.app_name
+    cwd = Path.cwd().resolve()
+
+    if args.target_dir:
+        app_dir = Path(args.target_dir).resolve() / app_name
+    else:
+        app_dir = cwd / app_name
+
+    app_dir.mkdir(parents=True, exist_ok=True)
+
+    (app_dir / "app.py").write_text(_APP_PY.format(app_name=app_name), encoding="utf-8")
+    (app_dir / "models.py").write_text(
+        _MODELS_PY.format(app_name=app_name), encoding="utf-8"
+    )
+
+    try:
+        display = str(app_dir.relative_to(cwd))
+    except ValueError:
+        display = str(app_dir)
+
+    print(f"Created app: {app_name!r} at: {display}")
+    print("  app.py")
+    print("  models.py")
+
+
+# ---------------------------------------------------------------------------
+# Command: main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    """Entry point for the ``mikiorm`` management CLI."""
     parser = argparse.ArgumentParser(
         prog="miki-orm",
-        description="miki-orm management CLI tool"
+        description="miki-orm management CLI (settings.py only — no YAML/TOML config).",
     )
     parser.add_argument(
-        "--settings", 
-        help="The Python path to a settings module (e.g. 'config.settings'). "
-             "Falls back to MIKI_ORM_SETTINGS_MODULE environment variable."
+        "--settings",
+        default=None,
+        help=(
+            "Python path to a settings module (e.g. 'conf.settings'). "
+            "Falls back to the MIKI_ORM_SETTINGS_MODULE environment variable."
+        ),
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose (DEBUG) output.",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True, title="Commands")
 
-    # Command: makemigrations
-    makemig_parser = subparsers.add_parser(
-        "makemigrations", 
-        help="Scan models and generate new migration files"
-    )
-    makemig_parser.add_argument(
-        "app_labels", 
-        nargs="*", 
-        help="App labels to restrict migration generation (optional)"
+    # ── Core migration commands ──────────────────────────────────────────
+
+    subparsers.add_parser(
+        "makemigrations",
+        help="Scan models and generate new migration files.",
+    ).add_argument(
+        "app_labels",
+        nargs="*",
+        help="Restrict to specific app labels (optional).",
     )
 
-    # Command: migrate
     migrate_parser = subparsers.add_parser(
-        "migrate", 
-        help="Apply pending migrations to the database"
+        "migrate",
+        help="Apply pending migrations to the configured database.",
     )
     migrate_parser.add_argument(
-        "database", 
-        nargs="?", 
-        default="default", 
-        help="Database alias to migrate (default: 'default')"
+        "database",
+        nargs="?",
+        default="default",
+        help="Database alias to migrate (default: 'default').",
     )
     migrate_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show the SQL that would be executed without applying it.",
+        help="Print SQL without executing it.",
     )
 
-    # Command: rollback
-    rollback_parser = subparsers.add_parser(
-        "rollback", 
-        help="Rollback applied migrations"
-    )
-    rollback_parser.add_argument(
-        "steps", 
-        type=int, 
-        nargs="?", 
-        default=1, 
-        help="Number of migrations to roll back (default: 1)"
+    subparsers.add_parser(
+        "rollback",
+        help="Roll back applied migrations.",
+    ).add_argument(
+        "steps",
+        nargs="?",
+        type=int,
+        default=1,
+        help="Number of migrations to roll back (default: 1).",
     )
 
-    # Command: history
-    subparsers.add_parser("history", help="Show migration history")
+    subparsers.add_parser("history", help="List all discovered migration files.")
+    subparsers.add_parser("status", help="Show applied / pending migration status.")
 
-    # Command: status
-    subparsers.add_parser("status", help="Show current migration status")
+    subparsers.add_parser(
+        "check",
+        help="Validate model definitions, database settings, and migration state.",
+    )
 
-    # Command: check
-    subparsers.add_parser("check", help="Validate model definitions and database settings")
+    subparsers.add_parser(
+        "dbcheck",
+        help="Verify the database connection and list existing tables.",
+    )
 
-    # Command: dbcheck
-    subparsers.add_parser("dbcheck", help="Check database health and table existence")
-
-    # Command: inspectdb
     inspect_parser = subparsers.add_parser(
-        "inspectdb", 
-        help="Introspect the database and generate model definitions"
+        "inspectdb",
+        help="Introspect the database and emit miki-orm model definitions.",
     )
     inspect_parser.add_argument(
-        "database", 
-        nargs="?", 
-        default="default", 
-        help="Database alias to inspect (default: 'default')"
+        "database",
+        nargs="?",
+        default="default",
+        help="Database alias to inspect (default: 'default').",
     )
 
-    # Command: squashmigrations
     squash_parser = subparsers.add_parser(
-        "squashmigrations", help="Squash multiple migration files into a single one."
+        "squashmigrations",
+        help="Compress multiple migration files into a single one.",
     )
     squash_parser.add_argument(
         "app_label",
         nargs="?",
-        help="App label to squash migrations for (optional). If not provided, squashes all.",
+        help="App label to restrict squashing (optional).",
     )
     squash_parser.add_argument(
         "--no-input",
         action="store_true",
-        help="Do NOT prompt the user for input of any kind.",
+        help="Do not prompt for confirmation.",
     )
 
-    sqlflush_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "sqlflush",
-        help="Prints the SQL statements that would flush all tables in the database.",
-    )
-    sqlflush_parser.add_argument(
+        help="Print DELETE statements for every table.",
+    ).add_argument(
         "--no-input",
         action="store_true",
-        help="Do NOT prompt the user for input of any kind.",
+        help="Do not prompt for confirmation.",
     )
 
-    sqldiff_parser = subparsers.add_parser(
+    show_diff_parser = subparsers.add_parser(
         "show_sqldiff",
-        help="Preview the SQL statements that will be executed by migrations"
+        help="Preview the SQL that pending migrations would execute.",
     )
-    sqldiff_parser.add_argument("database", nargs="?", default="default", help="Database alias to preview (default: 'default')")
+    show_diff_parser.add_argument(
+        "database",
+        nargs="?",
+        default="default",
+        help="Database alias to preview migrations for (default: 'default').",
+    )
 
-    # Command: shell
-    subparsers.add_parser("shell", help="Open an interactive Python shell with models pre-imported")
+    subparsers.add_parser(
+        "shell",
+        help="Open an interactive Python shell with all models pre-imported.",
+    )
+
+    # ── Scaffold commands ─────────────────────────────────────────────────
+
+    subparsers.add_parser(
+        "startproject",
+        help="Create a new miki-orm project with a settings.py scaffold.",
+    ).add_argument(
+        "project_name",
+        help="Name for the project folder / settings module (e.g. 'conf').",
+    )
+
+    startapp_parser = subparsers.add_parser(
+        "startapp",
+        help="Scaffold a new app with boilerplate app.py and models.py.",
+    )
+    startapp_parser.add_argument(
+        "app_name",
+        help="Name for the app (e.g. 'users').",
+    )
+    startapp_parser.add_argument(
+        "target_dir",
+        nargs="?",
+        default=None,
+        help=(
+            "Directory to create the app in. "
+            "Omit to create in the current working directory; "
+            "provide a path to nest under it."
+        ),
+    )
+
+    # ── Parse ─────────────────────────────────────────────────────────────
 
     args = parser.parse_args()
 
-    # Settings discovery
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
+
+    # ── Scaffold commands run without needing a settings module ────────────
+    if args.command == "startproject":
+        _handle_startproject(args)
+        return
+    if args.command == "startapp":
+        _handle_startapp(args)
+        return
+
+    # ── All other commands require a settings module ──────────────────────
     settings_module = args.settings or os.environ.get("MIKI_ORM_SETTINGS_MODULE")
     if settings_module:
         load_settings(settings_module)
     elif os.path.exists("settings.py"):
         load_settings("settings")
+    else:
+        logger.error(
+            "No settings module found. Pass --settings=<module> or place a "
+            "settings.py in the current directory."
+        )
+        sys.exit(1)
 
+    # ── Dispatch ───────────────────────────────────────────────────────────
     try:
+        from mikiorm.migrations.engine import MigrationEngine
+        from mikiorm.models.register import ModelRegistry
+        from mikiorm.conf.settings import connection_manager, settings
+        from mikiorm.backends.base.dialect import get_safe_builder
+
         if args.command == "makemigrations":
             logger.info("Scanning for model changes...")
-            ops = MigrationEngine().makemigrations(args.app_labels if args.app_labels else None)
-            logger.info(f"Success: Generated {len(ops)} migration operation(s)." if ops else "No changes detected.")
+            ops = MigrationEngine().makemigrations(
+                args.app_labels if args.app_labels else None
+            )
+            logger.info(
+                (
+                    "Success: Generated %d migration operation(s)."
+                    if ops
+                    else "No changes detected."
+                ),
+                len(ops) if ops else 0,
+            )
+
         elif args.command == "migrate":
+            engine = MigrationEngine()
             if args.dry_run:
-                # from mikiorm.migrations.engine import MigrationEngine # Already imported
-
-                logger.info(
-                    f"Dry run: Generating SQL for migrations on database '{args.database}'..."
-                )
-                engine = MigrationEngine()
+                logger.info("Dry run — SQL for database '%s':", args.database)
                 history = engine.show_history()
-
                 if not history:
-                    logger.info("No migrations found in the migrations directory.")
+                    logger.info("No migrations found.")
                     return
-
                 print("\n-- miki-orm SQL Migration Dry Run")
                 print(f"-- Target Database: {args.database}")
 
-                class SQLCapturingConnection:
+                class _SQLCapturer:
                     def execute(self, sql, params=()):
-                        final_sql = sql
-                        if params:
-                            for p in params:
-                                val = (
-                                    f"'{p}'" if isinstance(p, (str, bytes)) else str(p)
-                                )
-                                final_sql = final_sql.replace("?", val, 1).replace(
-                                    "%s", val, 1
-                                )
-                        print(f"{final_sql.strip()};")
+                        s = sql
+                        for p in params or ():
+                            s = s.replace("?", f"'{p}'", 1)
+                            s = s.replace("%s", f"'{p}'", 1)
+                        print(f"{s.strip()};")
                         return self
 
-                    def fetchall(self, sql, params=()):
+                    def fetchall(self, *a, **kw):
                         return []
 
-                    def fetchone(self, sql, params=()):
+                    def fetchone(self, *a, **kw):
                         return None
 
                     def commit(self):
@@ -197,202 +489,227 @@ def main():
                     def rollback(self):
                         pass
 
-                capturer = SQLCapturingConnection()
-                for migration_file in history:
-                    filepath = os.path.join(engine.migrations_path, migration_file)
-                    print(f"\n-- --- Migration: {migration_file} ---")
-                    engine._apply_migration_direct(filepath, capturer)
+                cap = _SQLCapturer()
+                for fname in history:
+                    path = os.path.join(engine.migrations_path, fname)
+                    print(f"\n-- --- Migration: {fname} ---")
+                    engine._apply_migration_direct(path, cap)
                 print("\n-- End of Dry Run")
             else:
-                logger.info(f"Applying migrations to database '{args.database}'...")
-                MigrationEngine().migrate(target=args.database)
+                logger.info("Applying migrations to database '%s'...", args.database)
+                engine.migrate(target=args.database)
                 logger.info("Success: Database is up to date.")
+
         elif args.command == "check":
             logger.info("Performing system checks...")
-
-            # 1. Verify Model Registry
-            from mikiorm.settings import settings
-
-            # Explicitly trigger model discovery to ensure registry is populated
             engine = MigrationEngine()
             engine.discover_models()
 
             models = ModelRegistry.all_models()
             if not models:
-                logger.warning("  [WARN] No models found in the registry. Ensure modules calling @register are imported or listed in MODEL_PATHS.")
+                logger.warning(
+                    "  [WARN] No models found. Ensure modules calling @register are imported."
+                )
             else:
-                logger.info(f"  [OK] {len(models)} model(s) registered.")
+                logger.info("  [OK] %d model(s) registered.", len(models))
 
-            # Validate Connection
             if connection_manager.validate_connection():
                 logger.info("  [OK] Database settings and connection validated.")
-
                 with connection_manager.get_connection() as conn:
-                    # 2. Check for unapplied migration files
                     unapplied = engine.get_unapplied_migrations(conn)
                     if unapplied:
-                        logger.error(f"  [FAIL] {len(unapplied)} migration(s) are pending application.")
+                        logger.error(
+                            "  [FAIL] %d migration(s) are pending.", len(unapplied)
+                        )
                         for m in unapplied:
-                            logger.error(f"         - {m}")
-                        logger.error("         Run 'migrate' to apply them.")
+                            logger.error("         - %s", m)
                     else:
                         logger.info("  [OK] Database is up to date with migration files.")
 
-                    # 3. Check for model changes not yet in migration files
                     missing_ops = engine.get_missing_migration_operations(conn)
                     if missing_ops:
-                        logger.error("  [FAIL] Changes detected in models that are not in migration files.")
-                        logger.error("         Run 'makemigrations' to update migration files.")
+                        logger.error(
+                            "  [FAIL] Changes in models not yet in migration files."
+                        )
                     else:
                         logger.info("  [OK] All models have corresponding migration files.")
-                        
-                if unapplied or missing_ops:
-                    sys.exit(1)
+
+                    if unapplied or missing_ops:
+                        sys.exit(1)
             else:
                 logger.error("  [FAIL] Database connection check failed.")
                 sys.exit(1)
 
             logger.info("System check identified no issues.")
+
         elif args.command == "dbcheck":
             logger.info("Performing database health check...")
             if connection_manager.validate_connection():
                 logger.info("  [OK] Database connection is alive.")
                 from mikiorm.migrations.schema import get_introspector
                 db_config = settings.get_database("default")
-                conn = connection_manager.get_connection()
-                introspector = get_introspector(conn, db_config.engine)
-                tables = introspector.get_tables()
-                logger.info(f"  [OK] Found {len(tables)} tables in schema.")
+                with connection_manager.get_connection() as conn:
+                    introspector = get_introspector(conn, db_config.engine)
+                    tables = introspector.get_tables()
+                logger.info("  [OK] Found %d table(s) in schema.", len(tables))
             else:
                 logger.error("  [FAIL] Database connection could not be established.")
                 sys.exit(1)
-        elif args.command == "show_sqldiff":
-            from mikiorm.migrations.engine import MigrationEngine
-            from mikiorm.query.safe_builder import get_safe_builder
-            logger.info("Generating SQL preview for migrations...")
-            engine = MigrationEngine()
-            history = engine.show_history()
 
-            if not history:
+        elif args.command == "show_sqldiff":
+            logger.info("Generating SQL preview...")
+            engine = MigrationEngine()
+            history_map = engine._build_migration_map()
+            if not history_map:
                 logger.info("No migrations found in the migrations directory.")
                 return
-
-            print("\n-- miki-orm SQL Migration Preview")
-            print(f"-- Target Database: {args.database or 'default'}")
-
-            db_config = connection_manager.get_database_config(args.database or 'default')
+            db_config = settings.get_database(args.database)
             builder = get_safe_builder(db_config.engine)
-            class SQLCapturingConnection:
-                def execute(self, sql, params=()):
-                    final_sql = sql
-                    if params:
-                        for p in params:
-                            val = f"'{p}'" if isinstance(p, (str, bytes)) else str(p)
-                            final_sql = final_sql.replace(builder.get_placeholder(), val, 1)
-                    print(f"{final_sql.strip()};") # Ensure semicolon for SQL
-                    return self
-                def fetchall(self, sql, params=()): return []
-                def fetchone(self, sql, params=()): return None
-                def commit(self): pass
-                def rollback(self): pass
+            print("\n-- miki-orm SQL Migration Preview")
+            for fname, path in history_map.items():
+                print(f"\n-- --- Migration: {fname} ---")
 
-            capturer = SQLCapturingConnection()
-            for migration_file in history:
-                filepath = os.path.join(engine.migrations_path, migration_file)
-                print(f"\n-- --- Migration: {migration_file} ---")
-                engine._apply_migration_direct(filepath, capturer)
+                class _Cap:
+                    def execute(self, sql, params=()):
+                        s = sql
+                        for p in params or ():
+                            s = s.replace(builder.get_placeholder(), f"'{p}'", 1)
+                        print(f"{s.strip()};")
+                        return self
+
+                    def fetchall(self, *a, **kw):
+                        return []
+
+                    def fetchone(self, *a, **kw):
+                        return None
+
+                    def commit(self):
+                        pass
+
+                    def rollback(self):
+                        pass
+
+                engine._apply_migration_direct(path, _Cap())
             print("\n-- End of Preview")
+
+        elif args.command == "shell":
+            import code as _code
+
+            logger.info("Opening interactive shell...")
+            engine = MigrationEngine()
+            engine.discover_models()
+            models = ModelRegistry.all_models()
+            namespace: dict[str, Any] = {"mikiorm": __import__("mikiorm")}
+            for model_cls in models:
+                namespace[model_cls.__name__] = model_cls
+            banner = (
+                f"miki-orm shell (Python {sys.version})\n"
+                f"Models pre-imported: "
+                f"{', '.join(m.__name__ for m in models) if models else 'None'}\n"
+                f"The 'mikiorm' package is also available."
+            )
+            _code.interact(banner=banner, local=namespace)
+
+        elif args.command == "status":
+            engine = MigrationEngine()
+            history = engine.show_history()
+            with connection_manager.get_connection() as conn:
+                applied = {
+                    r[0]
+                    for r in conn.fetchall("SELECT name FROM _mikiorm_migrations", ())
+                }
+            print()
+            print(f"{'Status':<12} | {'Migration Name'}")
+            print("-" * 50)
+            for mig in history:
+                tag = "[X] Applied" if mig in applied else "[ ] Pending"
+                print(f"{tag:<12} | {mig}")
+
+        elif args.command == "rollback":
+            engine = MigrationEngine()
+            engine.rollback(None, steps=args.steps)
+            logger.info("Success: Rolled back %d migration(s).", args.steps)
+
+        elif args.command == "history":
+            engine = MigrationEngine()
+            for item in engine.show_history():
+                print(f"  [X] {item}")
+
         elif args.command == "inspectdb":
             from mikiorm.migrations.schema import get_introspector
-            from mikiorm.settings import settings
 
             db_config = settings.get_database(args.database)
-            engine = db_config.engine
-            conn = connection_manager.get_connection(args.database)
-            introspector = get_introspector(conn, engine)
+            with connection_manager.get_connection(args.database) as engine:
+                introspector = get_introspector(engine, db_config.engine)
+                tables = introspector.get_tables()
 
-            tables = introspector.get_tables()
-
-            print("# This is an auto-generated miki-orm model module.")
-            print("# You'll need to check the generated models for correctness.")
+            print("# Auto-generated miki-orm model module.")
+            print("# Verify generated models before using.")
             print("from mikiorm import models\n")
 
             for table_name in tables:
-                if table_name.startswith('_migration'): # Skip internal tables
+                if table_name.startswith("_migration"):
                     continue
-
-                # Simple camel case for class name
-                class_name = "".join(word.capitalize() for word in table_name.split("_"))
-                if class_name.endswith("s") and len(class_name) > 1: # Basic plural removal
+                class_name = "".join(w.capitalize() for w in table_name.split("_"))
+                if class_name.endswith("s") and len(class_name) > 1:
                     class_name = class_name[:-1]
 
                 print(f"class {class_name}(models.Model):")
-                columns = introspector.get_columns(table_name)
-
-                for col in columns:
+                cols = introspector.get_columns(table_name)
+                for col in cols:
                     field_name = col["name"]
                     db_type = col["type"].upper()
                     is_pk = col.get("primary_key", False)
                     is_null = col.get("null", True)
                     is_unique = col.get("unique", False)
 
-                    field_type = "TextField" # Default
-                    field_params = []
+                    field_type = "TextField"
+                    field_params: list[str] = []
 
                     if "INT" in db_type:
-                        if is_pk:
-                            field_type = "AutoField"
-                        else:
-                            field_type = "IntegerField"
+                        field_type = "AutoField" if is_pk else "IntegerField"
                     elif "VARCHAR" in db_type or "CHAR" in db_type:
                         field_type = "CharField"
-                        match = re.search(r"\((\d+)\)", db_type)
-                        if match:
-                            field_params.append(f"max_length={match.group(1)}")
-                        else:
-                            field_params.append("max_length=255")
+                        m = __import__("re").search(r"\((\d+)\)", db_type)
+                        field_params.append(
+                            f"max_length={m.group(1)}" if m else "max_length=255"
+                        )
                     elif "TEXT" in db_type:
                         field_type = "TextField"
                     elif "BOOL" in db_type:
-                        field_type = "BooleanField" # SQLite stores booleans as INTEGER (0 or 1)
+                        field_type = "BooleanField"
                     elif "DECIMAL" in db_type or "NUMERIC" in db_type:
                         field_type = "DecimalField"
-                        match = re.search(r"\((\d+),\s*(\d+)\)", db_type)
-                        if match:
-                            field_params.append(f"max_digits={match.group(1)}")
-                            field_params.append(f"decimal_places={match.group(2)}")
+                        m = __import__("re").search(r"\((\d+),\s*(\d+)\)", db_type)
+                        if m:
+                            field_params += [
+                                f"max_digits={m.group(1)}",
+                                f"decimal_places={m.group(2)}",
+                            ]
                         else:
-                            field_params.append("max_digits=10, decimal_places=2")
-                    elif "FLOAT" in db_type or "REAL" in db_type or "DOUBLE" in db_type:
+                            field_params += ["max_digits=10", "decimal_places=2"]
+                    elif db_type in ("FLOAT", "REAL", "DOUBLE", "FLOAT8"):
                         field_type = "FloatField"
                     elif "DATETIME" in db_type or "TIMESTAMP" in db_type:
                         field_type = "DateTimeField"
-                    elif "DATE" in db_type:
+                    elif "DATE" in db_type and "TIME" not in db_type:
                         field_type = "DateField"
-                    elif "TIME" in db_type:
+                    elif "TIME" in db_type and "DATE" not in db_type:
                         field_type = "TimeField"
                     elif "BLOB" in db_type or "BYTEA" in db_type:
                         field_type = "BinaryField"
                     elif "UUID" in db_type:
                         field_type = "UUIDField"
                     elif "JSON" in db_type:
-                        field_type = "BooleanField"
+                        field_type = "JSONField"
 
-                    # Add common field parameters if not already handled by FK/O2O
-                    # Simplified: assuming no FK info available from introspection for now
-                    # A full implementation would need to introspect FKs.
-                    fk_info = None # Placeholder
-                    if not fk_info:
-                        if (
-                            is_pk and field_type != "AutoField"
-                        ):  # AutoField handles its own PK
-                            field_params.append("primary_key=True")
-                        if not is_null and not is_pk: # AutoField is implicitly NOT NULL
-                            field_params.append("null=False")
-                        if is_unique and not is_pk:  # Unique is implied for PK
-                            field_params.append("unique=True")
+                    if is_pk and field_type != "AutoField":
+                        field_params.append("primary_key=True")
+                    if not is_null and not is_pk:
+                        field_params.append("null=False")
+                    if is_unique and not is_pk:
+                        field_params.append("unique=True")
 
-                    # Remove redundant null=False for AutoField and BooleanField
                     if field_type == "AutoField" and "null=False" in field_params:
                         field_params.remove("null=False")
                     if field_type == "BooleanField" and "null=False" in field_params:
@@ -402,99 +719,60 @@ def main():
                     print(f"    {field_name} = models.{field_type}({params_str})")
 
                 print("\n    class Meta:")
-                print(f"        table_name = \"{table_name}\"")
-                print("\n")
-        elif args.command == "sqlflush": # This command is not in the TRD/PRD, but exists in cli.py
-            from mikiorm.migrations.schema import get_introspector
-            from mikiorm.settings import settings
-            from mikiorm.query.safe_builder import get_safe_builder
+                print(f'        table_name = "{table_name}"\n')
 
-            logger.info("Generating SQL to flush all tables...")
+        elif args.command == "sqlflush":
+            from mikiorm.migrations.schema import get_introspector
+
             db_config = settings.get_database(args.database)
             engine_name = db_config.engine
-            conn = connection_manager.get_connection(args.database)
 
             if not args.no_input:
-                confirm = input(
-                    f"Are you sure you want to flush all data from database '{args.database}'? (yes/no): "
+                ans = input(
+                    f"Flush ALL data from database '{args.database}'? (yes/no): "
                 )
-                if confirm.lower() != "yes":
-                    logger.info("Flush cancelled.")
-                    sys.exit(0)
-            introspector = get_introspector(conn, engine_name)
-            builder = get_safe_builder(engine_name)
-
-            tables = introspector.get_tables()
+                if ans.lower() != "yes":
+                    print("Flush cancelled.")
+                    return
+            with connection_manager.get_connection(args.database) as conn:
+                introspector = get_introspector(conn, engine_name)
+                builder = get_safe_builder(engine_name)
+                tables = introspector.get_tables()
             print("\n-- miki-orm SQL Flush Preview")
-            print(f"-- Target Database: {args.database or 'default'}")
-            for table_name in tables:
-                if not table_name.startswith('_migration'): # Skip internal ORM tables
-                    print(f"DELETE FROM {builder.quote_table(table_name)};")
-            print("\n-- End of Flush Preview")
-        elif args.command == "shell":
-            import code
-            logger.info("Starting interactive shell...")
+            print(f"-- Target Database: {args.database}")
+            for t in tables:
+                if not t.startswith("_migration"):
+                    print(f"DELETE FROM {builder.quote_table(t)};")
+            print("\n-- End of Preview")
 
-            # Prepare namespace with mikiorm and all registered models
-            namespace = {"mikiorm": mikiorm}
-
-            # Discover models so they are available in the shell
-            engine = MigrationEngine()
-            engine.discover_models()
-
-            models = ModelRegistry.all_models()
-            for model_cls in models:
-                namespace[model_cls.__name__] = model_cls
-
-            banner = (
-                f"miki-orm shell (Python {sys.version})\n"
-                f"Models pre-imported: {', '.join(m.__name__ for m in models) if models else 'None'}\n"
-                f"The 'mikiorm' package is also available."
-            )
-            code.interact(banner=banner, local=namespace)
-        elif args.command == "status":
-            logger.info("Checking migration status...")
-            engine = MigrationEngine()
-            history = engine.show_history()
-            with connection_manager.get_connection() as conn:
-                applied = engine.get_applied_migrations(conn)
-            print("\nMigration Status:")
-            print(f"{'Status':<12} | {'Migration Name'}")
-            print("-" * 50)
-            for migration in history:
-                status_str = "[X] Applied" if migration in applied else "[ ] Pending"
-                print(f"{status_str:<12} | {migration}")
-        elif args.command in ("rollback", "history"):
-            # These directly use the engine for now as exposed by the package
-            engine = MigrationEngine()
-            if args.command == "rollback":
-                engine.rollback(None, steps=args.steps)
-                logger.info(f"Success: Rolled back {args.steps} migration(s).")
-            else:
-                for item in engine.show_history():
-                    print(f"  [X] {item}")
         elif args.command == "squashmigrations":
-            from mikiorm.migrations.engine import MigrationEngine
-
             engine = MigrationEngine()
             if not args.no_input:
-                confirm = input(
-                    "Squashing migrations will delete old migration files. Are you sure? (yes/no): "
+                ans = input(
+                    "Squash will delete old migration files. Continue? (yes/no): "
                 )
-                if confirm.lower() != "yes":
-                    logger.info("Squash cancelled.")
-                    sys.exit(0)
+                if ans.lower() != "yes":
+                    print("Squash cancelled.")
+                    return
             logger.info("Squashing migrations...")
-            squashed_file = engine.squash_migrations(args.app_label)
-            if squashed_file:
-                logger.info(f"Successfully squashed migrations into: {squashed_file}")
+            result = engine.squash_migrations(args.app_label)
+            if result:
+                logger.info("Squashed into: %s", result)
             else:
-                logger.info(
-                    "No migrations to squash or no changes detected after squashing."
-                )
-    except Exception as e:
-        logger.error(f"Operation failed: {e}")
+                logger.info("Nothing to squash.")
+
+    except Exception as exc:
+        logger.error("Error: %s", exc, exc_info=args.verbose)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
+
+
+__all__ = [
+    "load_settings",
+    "main",
+    "_handle_startproject",
+    "_handle_startapp",
+]

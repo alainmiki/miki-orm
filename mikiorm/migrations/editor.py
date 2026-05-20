@@ -11,7 +11,7 @@ import logging
 from typing import Any, Optional
 
 from . import operations
-from ..query.safe_builder import get_safe_builder
+from ..query import get_safe_builder
 
 logger = logging.getLogger(__name__)
 

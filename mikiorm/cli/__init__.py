@@ -1,30 +1,15 @@
-"""CLI management package for mikiorm.
-
-Provides:
-- Unified CLI with migration, database, and model commands
-- Configuration loading with YAML/TOML support
-- Environment variable substitution
-- Command groups and configuration management
-"""
+"""CLI management package for mikiorm."""
 
 from .cli import (
-    ConfigFormat,
-    CLIConfig,
-    ConfigValidator,
-    ConfigLoader,
-    CommandGroup,
-    CLIManager,
     load_settings,
     main,
+    _handle_startproject,
+    _handle_startapp,
 )
 
 __all__ = [
-    "ConfigFormat",
-    "CLIConfig",
-    "ConfigValidator",
-    "ConfigLoader",
-    "CommandGroup",
-    "CLIManager",
     "load_settings",
     "main",
+    "_handle_startproject",
+    "_handle_startapp",
 ]

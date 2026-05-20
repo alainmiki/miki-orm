@@ -12,11 +12,13 @@ from .adapter import (
     get_param_placeholder,
 )
 from .base import BaseDatabaseWrapper, DatabaseSettings, get_dialect_from_engine
-from .dialect import Dialect, SafeBuilder, get_safe_builder
+from .dialect import Dialect, SafeBuilder, QueryBuilder, get_safe_builder
 from .pool import (
     AsyncConnectionPool,
+    ConnectionPool,
     PooledAsyncConnection,
     PooledConnection,
+    QueryExecutor,
     SyncConnectionPool,
 )
 from .schema_editor import SchemaEditor, field_to_sql_type
@@ -37,10 +39,13 @@ __all__ = [
     # dialect / SQL building
     "Dialect",
     "SafeBuilder",
+    "QueryBuilder",
     "get_safe_builder",
     # pools
     "AsyncConnectionPool",
-    "SyncConnectionPool",
+    "ConnectionPool",
     "PooledConnection",
     "PooledAsyncConnection",
+    "QueryExecutor",
+    "SyncConnectionPool",
 ]

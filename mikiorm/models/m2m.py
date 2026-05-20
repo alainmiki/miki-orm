@@ -10,7 +10,7 @@ from typing import Any, TYPE_CHECKING, List
 if TYPE_CHECKING:
     from .base import Model
 
-from ..query.safe_builder import get_safe_builder
+from ..query import get_safe_builder
 from ..conf.settings import settings
 
 
@@ -40,7 +40,9 @@ class ManyToManyManager:
             from .base import Model
             to = self.field.to
             if isinstance(to, str):
-                from .registry import ModelRegistry
+                from .register import ModelRegistry
+                from .register import ModelRegistry
+
                 resolved = ModelRegistry.get_model(to)
                 if resolved is None:
                     raise LookupError(f"Model '{to}' not found in registry")
