@@ -91,6 +91,27 @@ class Field:
         """Convert a Python value to its database representation."""
         return value
 
+    def has_default(self) -> bool:
+        """Return True if this field has a meaningful default value."""
+        return self.default is not None or self.db_default is not None
+
+    def get_default(self) -> Any:
+        """Return the field's default value, resolving callables if needed."""
+        if callable(self.default):
+            return self.default()
+        if self.default is not None:
+            return self.default
+        return self.db_default
+
+    @property
+    def column(self) -> str:
+        """Return the effective column name used in the database.
+
+        Prefers explicit `db_column` when provided, otherwise falls back to
+        the field's `name` attribute (which migration code sets).
+        """
+        return self.db_column or (self.name or "")
+
     # ------------------------------------------------------------------
     # Choices helper
     # ------------------------------------------------------------------

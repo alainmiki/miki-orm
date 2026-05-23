@@ -114,6 +114,7 @@ class MigrationEngine:
         self, app_label: str | None = None
     ) -> list[tuple[str | None, Path]]:
         from ..conf.settings import settings
+        from ..models.register import get_default_registry
 
         locations: list[tuple[str | None, Path]] = []
         for app in settings.installed_apps:
@@ -129,6 +130,22 @@ class MigrationEngine:
                 locations.append((label, candidate))
             else:
                 locations.append((label, Path(self.migrations_path) / label))
+
+        if not settings.installed_apps:
+            registry = get_default_registry()
+            for app in registry.get_apps():
+                label = getattr(app, "label", None) or getattr(app, "app_name", None)
+                if not label:
+                    continue
+                if app_label and label != app_label:
+                    continue
+
+                app_path = getattr(app, "path", None) or getattr(app, "base_path", None)
+                if app_path:
+                    candidate = Path(app_path) / "migrations"
+                    locations.append((label, candidate))
+                else:
+                    locations.append((label, Path(self.migrations_path) / label))
 
         if app_label and not any(label == app_label for label, _ in locations):
             locations.append((app_label, Path(self.migrations_path) / app_label))

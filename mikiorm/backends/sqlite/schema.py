@@ -63,7 +63,10 @@ class SQLiteSchemaEditor(BaseSchemaEditor):
 
     def column_sql(self, model: Type[Model], field: Field, include_default: bool = True) -> str:
         """Generates the SQL for a column definition."""
-        field_type = field.db_type(self.connection)
+        from mikiorm.backends.base.schema_editor import field_to_sql_type
+        from mikiorm.backends.base.dialect import Dialect
+
+        field_type = field_to_sql_type(field, Dialect.SQLITE)
         constraints = [field_type]
 
         if field.primary_key:
@@ -81,12 +84,13 @@ class SQLiteSchemaEditor(BaseSchemaEditor):
                     default = f"'{default}'"
                 constraints.append(f"DEFAULT {default}")
 
-        return f"{self.builder.quote_name(field.column)} {' '.join(constraints)}"
+        field_name = field.name or getattr(field, "column", "")
+        return f"{self.builder.quote_column(field_name)} {' '.join(constraints)}"
 
     def create_model(self, model: Type[Model]) -> None:
         """Creates a table for the given model."""
         table_name = self.builder.quote_table(model._meta.table_name)
-        columns = []
+        columns: list[str] = []
         for field in model._meta.fields:
             columns.append(self.column_sql(model, field))
 
@@ -94,9 +98,11 @@ class SQLiteSchemaEditor(BaseSchemaEditor):
         for field in model._meta.fields:
             if field.is_relation and field.many_to_one:
                 fk_target_table = self.builder.quote_table(field.related_model._meta.table_name)
-                fk_target_column = self.builder.quote_name(field.related_model._meta.pk.column)
+                fk_target_column = self.builder.quote_column(
+                    field.related_model._meta.pk.column
+                )
                 columns.append(
-                    f"FOREIGN KEY ({self.builder.quote_name(field.column)}) "
+                    f"FOREIGN KEY ({self.builder.quote_column(field.column)}) "
                     f"REFERENCES {fk_target_table} ({fk_target_column}) "
                     f"{self.sql_on_delete(field.on_delete)}"
                 )
@@ -117,8 +123,8 @@ class SQLiteSchemaEditor(BaseSchemaEditor):
     def rename_field(self, model: Type[Model], old_name: str, new_name: str) -> None:
         """Rename a column on the model's table."""
         table_name = self.builder.quote_table(model._meta.table_name)
-        old_col = self.builder.quote_name(old_name)
-        new_col = self.builder.quote_name(new_name)
+        old_col = self.builder.quote_column(old_name)
+        new_col = self.builder.quote_column(new_name)
         sql = f"ALTER TABLE {table_name} RENAME COLUMN {old_col} TO {new_col}"
         self.connection.execute(sql)
         self.connection.commit()
@@ -141,7 +147,9 @@ class SQLiteSchemaEditor(BaseSchemaEditor):
 
         # Get all fields except the one being removed
         remaining_fields = [f for f in model._meta.fields if f.column != field.column]
-        remaining_columns = [self.builder.quote_name(f.column) for f in remaining_fields]
+        remaining_columns = [
+            self.builder.quote_column(f.column) for f in remaining_fields
+        ]
 
         try:
             # Get original table creation statement
@@ -165,9 +173,11 @@ class SQLiteSchemaEditor(BaseSchemaEditor):
             for field_obj in remaining_fields:
                 if field_obj.is_relation and field_obj.many_to_one:
                     fk_target_table = self.builder.quote_table(field_obj.related_model._meta.table_name)
-                    fk_target_column = self.builder.quote_name(field_obj.related_model._meta.pk.column)
+                    fk_target_column = self.builder.quote_column(
+                        field_obj.related_model._meta.pk.column
+                    )
                     columns.append(
-                        f"FOREIGN KEY ({self.builder.quote_name(field_obj.column)}) "
+                        f"FOREIGN KEY ({self.builder.quote_column(field_obj.column)}) "
                         f"REFERENCES {fk_target_table} ({fk_target_column}) "
                         f"{self.sql_on_delete(field_obj.on_delete)}"
                     )
@@ -190,9 +200,9 @@ class SQLiteSchemaEditor(BaseSchemaEditor):
             # Re-create preserved indexes
             for idx in preserved_indexes:
                 unique = "UNIQUE " if idx["unique"] else ""
-                cols = ", ".join(self.builder.quote_name(c) for c in idx["columns"])
+                cols = ", ".join(self.builder.quote_column(c) for c in idx["columns"])
                 self.connection.execute(
-                    f"CREATE {unique}INDEX {self.builder.quote_name(idx['name'])} "
+                    f"CREATE {unique}INDEX {self.builder.quote_column(idx['name'])} "
                     f"ON {quoted_table_name} ({cols})"
                 )
 
@@ -219,6 +229,53 @@ class SQLiteSchemaEditor(BaseSchemaEditor):
 
         # Get all fields with their current definitions (new_field should be in model._meta.fields)
         fields = model._meta.fields
+
+        # If the shim model has no fields (migration shim), introspect the
+        # current table structure and synthesize lightweight field objects
+        # sufficient for rebuilding the table.
+        if not fields:
+            from types import SimpleNamespace
+            from mikiorm.backends.sqlite.introspection import SQLiteIntrospection
+
+            introspector = SQLiteIntrospection(self.connection)
+            cols = introspector.get_columns(table_name)
+            synth: list[SimpleNamespace] = []
+            for col in cols:
+                fn = SimpleNamespace()
+                fn.name = col["name"]
+                fn.column = col["name"]
+                fn.primary_key = col.get("primary_key", False)
+                fn.null = col.get("null", True)
+                fn.unique = col.get("unique", False)
+                fn.default = col.get("default", None)
+                fn.is_relation = False
+                fn.many_to_one = False
+                fn.on_delete = None
+                fn.auto_created = fn.primary_key and str(
+                    col.get("type", "")
+                ).upper().startswith("INT")
+
+                def has_default(self=fn):
+                    return self.default is not None
+
+                def get_default(self=fn):
+                    return self.default
+
+                fn.has_default = has_default
+                fn.get_default = get_default
+                synth.append(fn)
+
+            # Append the new_field if it's not present in introspection
+            new_name = getattr(new_field, "name", None)
+            if new_name and new_name not in [c.name for c in synth]:
+                # Ensure new_field has `column` attr
+                if not hasattr(new_field, "column"):
+                    setattr(
+                        new_field, "column", getattr(new_field, "db_column", new_name)
+                    )
+                synth.append(new_field)
+
+            fields = synth
         columns = []
         for field_obj in fields:
             columns.append(self.column_sql(model, field_obj))
@@ -227,9 +284,11 @@ class SQLiteSchemaEditor(BaseSchemaEditor):
         for field_obj in fields:
             if field_obj.is_relation and field_obj.many_to_one:
                 fk_target_table = self.builder.quote_table(field_obj.related_model._meta.table_name)
-                fk_target_column = self.builder.quote_name(field_obj.related_model._meta.pk.column)
+                fk_target_column = self.builder.quote_column(
+                    field_obj.related_model._meta.pk.column
+                )
                 columns.append(
-                    f"FOREIGN KEY ({self.builder.quote_name(field_obj.column)}) "
+                    f"FOREIGN KEY ({self.builder.quote_column(field_obj.column)}) "
                     f"REFERENCES {fk_target_table} ({fk_target_column}) "
                     f"{self.sql_on_delete(field_obj.on_delete)}"
                 )
@@ -237,13 +296,13 @@ class SQLiteSchemaEditor(BaseSchemaEditor):
         create_temp_sql = f"CREATE TABLE {quoted_temp_table_name} ({', '.join(columns)})"
 
         # Prepare data copy columns (handle mapping from old column name to new if changed)
-        new_cols = [self.builder.quote_name(f.column) for f in fields]
+        new_cols = [self.builder.quote_column(f.column) for f in fields]
         old_cols = []
         for f in fields:
             if f.name == new_field.name:
-                old_cols.append(self.builder.quote_name(old_field.column))
+                old_cols.append(self.builder.quote_column(old_field.column))
             else:
-                old_cols.append(self.builder.quote_name(f.column))
+                old_cols.append(self.builder.quote_column(f.column))
 
         try:
             self.connection.execute(create_temp_sql)
@@ -256,11 +315,15 @@ class SQLiteSchemaEditor(BaseSchemaEditor):
             for idx in all_indexes:
                 unique = "UNIQUE " if idx["unique"] else ""
                 idx_cols = ", ".join(
-                    self.builder.quote_name(c) if c != old_field.column else self.builder.quote_name(new_field.column) 
+                    (
+                        self.builder.quote_column(c)
+                        if c != old_field.column
+                        else self.builder.quote_column(new_field.column)
+                    )
                     for c in idx["columns"]
                 )
                 self.connection.execute(
-                    f"CREATE {unique}INDEX {self.builder.quote_name(idx['name'])} ON {quoted_table_name} ({idx_cols})"
+                    f"CREATE {unique}INDEX {self.builder.quote_column(idx['name'])} ON {quoted_table_name} ({idx_cols})"
                 )
             self.connection.commit()
         except Exception as e:
